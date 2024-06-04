@@ -1,16 +1,16 @@
 // const M: usize = 8;
 const M: usize = 2;
 
-pub struct BadBTreeMap<K, V> {
-    root: Box<RootNode<K, V>>,
+pub struct BadBTree<T> {
+    root: Box<RootNode<T>>,
 }
 
-struct RootNode<K, V> {
-    pivots: Vec<(K, V)>,
-    children: Vec<Node<K, V>>,
+struct RootNode<T> {
+    pivots: Vec<T>,
+    children: Vec<Node<T>>,
 }
 
-impl<K: std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for RootNode<K, V> {
+impl<T: std::fmt::Debug> std::fmt::Debug for RootNode<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut list = f.debug_list();
         if self.children.is_empty() {
@@ -26,12 +26,12 @@ impl<K: std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for RootNode<K, V> 
     }
 }
 
-enum InsertResult<K, V> {
-    Propagate { pivot: (K, V), right: Node<K, V> },
+enum InsertResult<T> {
+    Propagate { pivot: T, right: Node<T> },
     Done,
 }
 
-impl<K, V> RootNode<K, V> {
+impl<T> RootNode<T> {
     fn check_invariants(&self) -> bool {
         // each node should not have more than M children
         if self.children.len() > M + 1 {
@@ -45,11 +45,11 @@ impl<K, V> RootNode<K, V> {
     }
 }
 
-impl<K: Ord, V> RootNode<K, V> {
-    fn insert_inner(&mut self, key: K, value: V) {
-        match self.pivots.binary_search_by(|pivot| pivot.0.cmp(&key)) {
+impl<T: Ord> RootNode<T> {
+    fn insert_inner(&mut self, value: T) {
+        match self.pivots.binary_search_by(|pivot| pivot.cmp(&value)) {
             Ok(index) => {
-                self.pivots[index].1 = value;
+                self.pivots[index] = value;
             }
             Err(index) => {
                 // key = 4
@@ -59,7 +59,7 @@ impl<K: Ord, V> RootNode<K, V> {
 
                 if self.children.is_empty() {
                     // leaf node
-                    self.pivots.insert(index, (key, value));
+                    self.pivots.insert(index, value);
                     if self.pivots.len() > M {
                         let rhs = self.pivots.split_off(M / 2 + 1);
                         let mid = self.pivots.pop().unwrap();
@@ -69,7 +69,7 @@ impl<K: Ord, V> RootNode<K, V> {
                         self.children.push(Node::Leaf(LeafNode { pivots: rhs }));
                     }
                 } else {
-                    match self.children[index].insert_inner(key, value) {
+                    match self.children[index].insert_inner(value) {
                         InsertResult::Propagate { pivot, right } => {
                             self.pivots.insert(index, pivot);
                             self.children.insert(index + 1, right);
@@ -101,7 +101,7 @@ impl<K: Ord, V> RootNode<K, V> {
     }
 }
 
-impl<K, V> InternalNode<K, V> {
+impl<T> InternalNode<T> {
     fn check_invariants(&self) -> bool {
         if self.children.len() > M + 1 || self.children.len() < (M + 1) / 2 {
             return false;
@@ -114,11 +114,11 @@ impl<K, V> InternalNode<K, V> {
     }
 }
 
-impl<K: Ord, V> InternalNode<K, V> {
-    fn insert_inner(&mut self, key: K, value: V) -> InsertResult<K, V> {
-        match self.pivots.binary_search_by(|pivot| pivot.0.cmp(&key)) {
+impl<T: Ord> InternalNode<T> {
+    fn insert_inner(&mut self, value: T) -> InsertResult<T> {
+        match self.pivots.binary_search_by(|pivot| pivot.cmp(&value)) {
             Ok(index) => {
-                self.pivots[index].1 = value;
+                self.pivots[index] = value;
                 InsertResult::Done
             }
             Err(index) => {
@@ -127,7 +127,7 @@ impl<K: Ord, V> InternalNode<K, V> {
                 //  = [1,2,3,5,6]
                 // index =   ^
 
-                match self.children[index].insert_inner(key, value) {
+                match self.children[index].insert_inner(value) {
                     InsertResult::Propagate { pivot, right } => {
                         self.pivots.insert(index, pivot);
                         self.children.insert(index + 1, right);
@@ -155,17 +155,17 @@ impl<K: Ord, V> InternalNode<K, V> {
     }
 }
 
-impl<K, V> LeafNode<K, V> {
+impl<T> LeafNode<T> {
     fn check_invariants(&self) -> bool {
         self.pivots.len() <= M
     }
 }
 
-impl<K: Ord, V> LeafNode<K, V> {
-    fn insert_inner(&mut self, key: K, value: V) -> InsertResult<K, V> {
-        match self.pivots.binary_search_by(|pivot| pivot.0.cmp(&key)) {
+impl<T: Ord> LeafNode<T> {
+    fn insert_inner(&mut self, value: T) -> InsertResult<T> {
+        match self.pivots.binary_search_by(|pivot| pivot.cmp(&value)) {
             Ok(index) => {
-                self.pivots[index].1 = value;
+                self.pivots[index] = value;
                 InsertResult::Done
             }
             Err(index) => {
@@ -174,7 +174,7 @@ impl<K: Ord, V> LeafNode<K, V> {
                 //  = [1,2,3,5,6]
                 // index =   ^
 
-                self.pivots.insert(index, (key, value));
+                self.pivots.insert(index, value);
                 if self.pivots.len() > M {
                     let rhs = self.pivots.split_off(M / 2 + 1);
                     let mid = self.pivots.pop().unwrap();
@@ -190,7 +190,7 @@ impl<K: Ord, V> LeafNode<K, V> {
     }
 }
 
-impl<K, V> Node<K, V> {
+impl<T> Node<T> {
     fn check_invariants(&self) -> bool {
         match self {
             Node::Internal(this) => this.check_invariants(),
@@ -199,21 +199,21 @@ impl<K, V> Node<K, V> {
     }
 }
 
-impl<K: Ord, V> Node<K, V> {
-    fn insert_inner(&mut self, key: K, value: V) -> InsertResult<K, V> {
+impl<T: Ord> Node<T> {
+    fn insert_inner(&mut self, value: T) -> InsertResult<T> {
         match self {
-            Node::Internal(x) => x.insert_inner(key, value),
-            Node::Leaf(x) => x.insert_inner(key, value),
+            Node::Internal(x) => x.insert_inner(value),
+            Node::Leaf(x) => x.insert_inner(value),
         }
     }
 }
 
-enum Node<K, V> {
-    Internal(InternalNode<K, V>),
-    Leaf(LeafNode<K, V>),
+enum Node<T> {
+    Internal(InternalNode<T>),
+    Leaf(LeafNode<T>),
 }
 
-impl<K: std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for Node<K, V> {
+impl<T: std::fmt::Debug> std::fmt::Debug for Node<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Internal(arg0) => arg0.fmt(f),
@@ -222,12 +222,12 @@ impl<K: std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for Node<K, V> {
     }
 }
 
-struct InternalNode<K, V> {
-    pivots: Vec<(K, V)>,
-    children: Vec<Node<K, V>>,
+struct InternalNode<T> {
+    pivots: Vec<T>,
+    children: Vec<Node<T>>,
 }
 
-impl<K: std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for InternalNode<K, V> {
+impl<T: std::fmt::Debug> std::fmt::Debug for InternalNode<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut list = f.debug_list();
 
@@ -241,11 +241,11 @@ impl<K: std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for InternalNode<K,
     }
 }
 
-struct LeafNode<K, V> {
-    pivots: Vec<(K, V)>,
+struct LeafNode<T> {
+    pivots: Vec<T>,
 }
 
-impl<K: std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for LeafNode<K, V> {
+impl<T: std::fmt::Debug> std::fmt::Debug for LeafNode<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut list = f.debug_list();
         list.entries(&self.pivots);
@@ -253,9 +253,9 @@ impl<K: std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for LeafNode<K, V> 
     }
 }
 
-impl<K, V> BadBTreeMap<K, V> {
+impl<T> BadBTree<T> {
     pub fn new() -> Self {
-        BadBTreeMap {
+        BadBTree {
             root: Box::new(RootNode {
                 pivots: vec![],
                 children: vec![],
@@ -264,14 +264,14 @@ impl<K, V> BadBTreeMap<K, V> {
     }
 }
 
-impl<K: Ord, V> BadBTreeMap<K, V> {
-    pub fn insert(&mut self, key: K, value: V) {
-        self.root.insert_inner(key, value);
+impl<T: Ord> BadBTree<T> {
+    pub fn insert(&mut self, value: T) {
+        self.root.insert_inner(value);
         debug_assert!(self.root.check_invariants());
     }
 }
 
-impl<K, V> Default for BadBTreeMap<K, V> {
+impl<T> Default for BadBTree<T> {
     fn default() -> Self {
         Self::new()
     }
@@ -279,32 +279,32 @@ impl<K, V> Default for BadBTreeMap<K, V> {
 
 #[cfg(test)]
 mod test {
-    use crate::BadBTreeMap;
+    use crate::BadBTree;
 
     #[test]
     fn insert() {
-        let mut btree = BadBTreeMap::new();
-        btree.insert(1, 1);
+        let mut btree = BadBTree::new();
+        btree.insert(1);
         dbg!(&btree.root);
-        btree.insert(2, 2);
+        btree.insert(2);
         dbg!(&btree.root);
-        btree.insert(3, 3);
+        btree.insert(3);
         dbg!(&btree.root);
-        btree.insert(4, 4);
+        btree.insert(4);
         dbg!(&btree.root);
-        btree.insert(5, 5);
+        btree.insert(5);
         dbg!(&btree.root);
-        btree.insert(6, 6);
+        btree.insert(6);
         dbg!(&btree.root);
-        btree.insert(7, 7);
+        btree.insert(7);
         dbg!(&btree.root);
-        btree.insert(8, 8);
+        btree.insert(8);
         dbg!(&btree.root);
-        btree.insert(9, 9);
+        btree.insert(9);
         dbg!(&btree.root);
-        btree.insert(10, 10);
+        btree.insert(10);
         dbg!(&btree.root);
-        btree.insert(11, 11);
+        btree.insert(11);
         dbg!(&btree.root);
     }
 }
