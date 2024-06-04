@@ -5,10 +5,25 @@ pub struct BadBTreeMap<K, V> {
     root: Box<RootNode<K, V>>,
 }
 
-#[derive(Debug)]
 struct RootNode<K, V> {
     pivots: Vec<(K, V)>,
     children: Vec<Node<K, V>>,
+}
+
+impl<K: std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for RootNode<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut list = f.debug_list();
+        if self.children.is_empty() {
+            list.entries(&self.pivots);
+        } else {
+            for (i, p) in self.pivots.iter().enumerate() {
+                list.entry(&self.children[i]);
+                list.entry(p);
+            }
+            list.entry(self.children.last().unwrap());
+        }
+        list.finish()
+    }
 }
 
 enum InsertResult<K, V> {
@@ -193,21 +208,49 @@ impl<K: Ord, V> Node<K, V> {
     }
 }
 
-#[derive(Debug)]
 enum Node<K, V> {
     Internal(InternalNode<K, V>),
     Leaf(LeafNode<K, V>),
 }
 
-#[derive(Debug)]
+impl<K: std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for Node<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Internal(arg0) => arg0.fmt(f),
+            Self::Leaf(arg0) => arg0.fmt(f),
+        }
+    }
+}
+
 struct InternalNode<K, V> {
     pivots: Vec<(K, V)>,
     children: Vec<Node<K, V>>,
 }
 
-#[derive(Debug)]
+impl<K: std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for InternalNode<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut list = f.debug_list();
+
+        for (i, p) in self.pivots.iter().enumerate() {
+            list.entry(&self.children[i]);
+            list.entry(p);
+        }
+        list.entry(self.children.last().unwrap());
+
+        list.finish()
+    }
+}
+
 struct LeafNode<K, V> {
     pivots: Vec<(K, V)>,
+}
+
+impl<K: std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for LeafNode<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut list = f.debug_list();
+        list.entries(&self.pivots);
+        list.finish()
+    }
 }
 
 impl<K, V> BadBTreeMap<K, V> {
