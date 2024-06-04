@@ -3,12 +3,6 @@ use std::{mem::MaybeUninit, num::NonZeroUsize};
 // const M: usize = 8;
 const M: usize = 2;
 
-#[repr(C)]
-struct ArrayPlusOne<T, const M: usize> {
-    head: MaybeUninit<T>,
-    tail: [MaybeUninit<T>; M],
-}
-
 fn uninit_array<T, const N: usize>() -> [MaybeUninit<T>; N] {
     // Safety: uninit arrays are allowed to be assumed init
     unsafe { MaybeUninit::uninit().assume_init() }
@@ -24,7 +18,7 @@ unsafe fn slice_assume_init<T>(slice: &[MaybeUninit<T>]) -> &[T] {
     unsafe { &*(slice as *const [MaybeUninit<T>] as *const [T]) }
 }
 
-impl<T, const M: usize> ArrayPlusOne<T, M> {
+impl<T, const M: usize> Children<T, M> {
     fn uninit() -> Self {
         Self {
             head: MaybeUninit::uninit(),
@@ -32,28 +26,35 @@ impl<T, const M: usize> ArrayPlusOne<T, M> {
         }
     }
 }
-impl<T, const M: usize> std::ops::Deref for ArrayPlusOne<T, M> {
-    type Target = [MaybeUninit<T>];
 
-    fn deref(&self) -> &Self::Target {
-        unsafe {
-            &*std::ptr::slice_from_raw_parts(self as *const _ as *const MaybeUninit<T>, M + 1)
-        }
-    }
-}
-impl<T, const M: usize> std::ops::DerefMut for ArrayPlusOne<T, M> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe {
-            &mut *std::ptr::slice_from_raw_parts_mut(self as *mut _ as *mut MaybeUninit<T>, M + 1)
-        }
-    }
-}
+// impl<T, const M: usize> std::ops::Deref for Children<T, M> {
+//     type Target = [MaybeUninit<Box<NodeArray<T, M>>>];
+
+//     fn deref(&self) -> &Self::Target {
+//         unsafe {
+//             &*std::ptr::slice_from_raw_parts(self as *const _ as *const MaybeUninit<_>, M + 1)
+//         }
+//     }
+// }
+// impl<T, const M: usize> std::ops::DerefMut for Children<T, M> {
+//     fn deref_mut(&mut self) -> &mut Self::Target {
+//         unsafe {
+//             &mut *std::ptr::slice_from_raw_parts_mut(self as *mut _ as *mut MaybeUninit<_>, M + 1)
+//         }
+//     }
+// }
 
 struct NodeArray<T, const M: usize> {
     len: usize,
     pivots: [MaybeUninit<T>; M],
     // empty if height = 0
-    children: ArrayPlusOne<Box<NodeArray<T, M>>, M>,
+    children: Children<T, M>,
+}
+
+// #[repr(C)]
+struct Children<T, const M: usize> {
+    head: MaybeUninit<Box<NodeArray<T, M>>>,
+    tail: [MaybeUninit<Box<NodeArray<T, M>>>; M],
 }
 
 /// # Safety
@@ -162,7 +163,7 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
                 len: M / 2,
                 pivots,
                 // new leaf has no children
-                children: ArrayPlusOne::uninit(),
+                children: Children::uninit(),
             },
         }
     }
@@ -192,10 +193,12 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
                 InsertResult2::Done
             }
         } else {
-            // SAFETY: `len+1` children are init
-            let children = unsafe { slice_assume_init_mut(&mut self.children[..self.len + 1]) };
+            let child = match index.checked_sub(1) {
+                None => unsafe { self.children.head.assume_init_mut() },
+                Some(index) => unsafe { self.children.tail[index].assume_init_mut() },
+            };
 
-            match children[index].insert(value, height - 1) {
+            match child.insert(value, height - 1) {
                 InsertResult2::Propagate { pivot, right } => {
                     if self.len == M {
                         todo!()
@@ -203,12 +206,16 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
                     } else {
                         // pivots: [T; self.len]
                         let pivots = self.pivots.as_mut_ptr().cast::<T>();
-                        // children: [Box<NodeArray<T, M>>; self.len+1]
-                        let children = self.children.as_mut_ptr().cast::<Box<NodeArray<T, M>>>();
+                        // children: [Box<NodeArray<T, M>>; self.len]
+                        let children = self
+                            .children
+                            .tail
+                            .as_mut_ptr()
+                            .cast::<Box<NodeArray<T, M>>>();
 
                         unsafe {
                             insert(pivots, self.len, index, pivot);
-                            insert(children, self.len + 1, index + 1, Box::new(right));
+                            insert(children, self.len, index, Box::new(right));
                         };
 
                         self.len += 1;
@@ -256,20 +263,20 @@ impl<T: std::fmt::Debug, const M: usize> std::fmt::Debug for NodeArrayFmt<'_, T,
 
         if self.height == 0 {
             list.entries(pivots);
-        } else {
-            let children = unsafe { slice_assume_init(&self.array.children[..self.array.len + 1]) };
-
-            for (i, p) in pivots.iter().enumerate() {
-                list.entry(&NodeArrayFmt {
-                    height: self.height - 1,
-                    array: &children[i],
-                });
-                list.entry(p);
-            }
+        } else if self.array.len > 0 {
             list.entry(&NodeArrayFmt {
                 height: self.height - 1,
-                array: children.last().unwrap(),
+                array: unsafe { self.array.children.head.assume_init_ref() },
             });
+
+            let tail = unsafe { slice_assume_init(&self.array.children.tail[..self.array.len]) };
+            for (p, c) in std::iter::zip(pivots, tail) {
+                list.entry(p);
+                list.entry(&NodeArrayFmt {
+                    height: self.height - 1,
+                    array: c,
+                });
+            }
         }
         list.finish()
     }
@@ -295,12 +302,12 @@ impl<T: Ord> OkBTree<T> {
                     let mut node = NodeArray {
                         len: 1,
                         pivots: uninit_array(),
-                        children: ArrayPlusOne::uninit(),
+                        children: Children::uninit(),
                     };
 
                     node.pivots[0].write(pivot);
-                    node.children[0].write(inner.node);
-                    node.children[1].write(Box::new(right));
+                    node.children.head.write(inner.node);
+                    node.children.tail[0].write(Box::new(right));
 
                     self.0 = Some(BTreeInner {
                         depth,
@@ -319,7 +326,7 @@ impl<T: Ord> OkBTree<T> {
                 node: Box::new(NodeArray {
                     len: 1,
                     pivots,
-                    children: ArrayPlusOne::uninit(),
+                    children: Children::uninit(),
                 }),
             });
         }
