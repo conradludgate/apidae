@@ -1,6 +1,7 @@
 use std::{mem::MaybeUninit, num::NonZeroUsize};
 
 use arrayvec::DetachedArrayVec;
+use equivalent::Comparable;
 
 mod arrayvec;
 
@@ -178,6 +179,32 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
             InsertResult::Done
         }
     }
+
+    fn search<Q: Comparable<T>>(&self, height: usize, q: &Q) -> Option<&T> {
+        assert!(Self::__M_IS_GREATER_THAN_ONE);
+
+        // SAFETY: `len` pivots are init
+        let pivots = unsafe { self.pivots.as_slice(self.len) };
+
+        let index = match pivots.binary_search_by(|pivot| q.compare(pivot).reverse()) {
+            Ok(index) => return Some(&pivots[index]),
+            Err(index) => index,
+        };
+
+        if height == 0 {
+            return None;
+        }
+
+        debug_assert!(self.len > 0, "non leaf nodes must have some children");
+        let child = match index.checked_sub(1) {
+            // SAFETY: head is always init when height > 0
+            None => unsafe { self.children.head.assume_init_ref() },
+            // SAFETY: len children are init
+            Some(index) => unsafe { &self.children.tail.as_slice(self.len)[index] },
+        };
+
+        child.search(height - 1, q)
+    }
 }
 
 pub struct OkBTree<T>(Option<BTreeInner<T>>);
@@ -262,6 +289,11 @@ impl<T> OkBTree<T> {
 }
 
 impl<T: Ord> OkBTree<T> {
+    pub fn get<Q: Comparable<T>>(&self, q: &Q) -> Option<&T> {
+        let inner = self.0.as_ref()?;
+        inner.node.search(inner.depth.get() - 1, q)
+    }
+
     pub fn insert(&mut self, value: T) {
         if let Some(mut inner) = self.0.take() {
             match inner.node.insert(value, inner.depth.get() - 1) {
@@ -349,5 +381,9 @@ mod test {
         dbg!(&btree);
         btree.insert(11);
         dbg!(&btree);
+
+        assert!(btree.get(&8).is_some());
+        assert!(btree.get(&12).is_none());
+        assert!(btree.get(&0).is_none());
     }
 }
