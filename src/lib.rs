@@ -4,8 +4,8 @@ use arrayvec::DetachedArrayVec;
 
 mod arrayvec;
 
-// const M: usize = 8;
-const M: usize = 2;
+const M: usize = 8;
+// const M: usize = 2;
 
 impl<T, const M: usize> Children<T, M> {
     const fn new() -> Self {
@@ -54,6 +54,7 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
         child: Option<Box<NodeArray<T, M>>>,
     ) -> InsertResult2<T, M> {
         debug_assert_eq!(self.len, M);
+        debug_assert!(M >= 2);
 
         // we are creating a new node,
         // the values being split off from rhs will be written here.
