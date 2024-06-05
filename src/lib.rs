@@ -1,80 +1,48 @@
 use std::{mem::MaybeUninit, num::NonZeroUsize};
 
+use arrayvec::DetachedArrayVec;
+
+mod arrayvec;
+
 // const M: usize = 8;
 const M: usize = 2;
 
-fn uninit_array<T, const N: usize>() -> [MaybeUninit<T>; N] {
-    // Safety: uninit arrays are allowed to be assumed init
-    unsafe { MaybeUninit::uninit().assume_init() }
-}
-
-unsafe fn slice_assume_init_mut<T>(slice: &mut [MaybeUninit<T>]) -> &mut [T] {
-    // SAFETY: similar to safety notes for `slice_get_ref`, but we have a
-    // mutable reference which is also guaranteed to be valid for writes.
-    unsafe { &mut *(slice as *mut [MaybeUninit<T>] as *mut [T]) }
-}
-
-unsafe fn slice_assume_init<T>(slice: &[MaybeUninit<T>]) -> &[T] {
-    unsafe { &*(slice as *const [MaybeUninit<T>] as *const [T]) }
-}
-
 impl<T, const M: usize> Children<T, M> {
-    fn uninit() -> Self {
+    const fn new() -> Self {
         Self {
             head: MaybeUninit::uninit(),
-            tail: uninit_array(),
+            tail: DetachedArrayVec::new(),
         }
     }
 }
 
 struct NodeArray<T, const M: usize> {
     len: usize,
-    pivots: [MaybeUninit<T>; M],
+    pivots: DetachedArrayVec<T, M>,
     // empty if height = 0
     children: Children<T, M>,
 }
 
 impl<T, const M: usize> NodeArray<T, M> {
-    fn drop_inner(&mut self, height: usize) {
+    unsafe fn drop_inner(&mut self, height: usize) {
         if std::mem::needs_drop::<T>() {
-            for p in &mut self.pivots[..self.len] {
-                unsafe { p.assume_init_drop() }
-            }
+            self.pivots.clear(self.len);
         }
         if height > 0 {
-            let mut head = *unsafe { self.children.head.assume_init_read() };
-            head.drop_inner(height - 1);
+            debug_assert!(self.len > 0);
+            self.children.head.assume_init_read().drop_inner(height - 1);
 
-            for c in &mut self.children.tail[..self.len] {
-                let mut head = *unsafe { c.assume_init_read() };
-                head.drop_inner(height - 1);
+            for mut c in self.children.tail.drain(self.len, 0..self.len) {
+                c.drop_inner(height - 1);
             }
         }
+        self.len = 0;
     }
 }
 
-// #[repr(C)]
 struct Children<T, const M: usize> {
     head: MaybeUninit<Box<NodeArray<T, M>>>,
-    tail: [MaybeUninit<Box<NodeArray<T, M>>>; M],
-}
-
-/// # Safety
-/// slice is a valid &[MaybeUninit<T>]
-/// * index <= len
-/// * len < slice.len()
-/// * slice[..len] is init.
-unsafe fn insert<T>(mut slice: *mut T, len: usize, i: usize, value: T) {
-    unsafe {
-        // let (_lhs, rhs) = pivots.split_at(index);
-        // rhs.len() == len-index;
-        let rhs = slice.add(i);
-
-        // slice = _lhs || value || rhs.
-        slice = slice.add(i);
-        rhs.copy_to_nonoverlapping(slice.add(1), len - i);
-        slice.write(value);
-    }
+    tail: DetachedArrayVec<Box<NodeArray<T, M>>, M>,
 }
 
 impl<T: Ord, const M: usize> NodeArray<T, M> {
@@ -83,177 +51,71 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
         &mut self,
         index: usize,
         value: T,
-        child: Option<NodeArray<T, M>>,
+        child: Option<Box<NodeArray<T, M>>>,
     ) -> InsertResult2<T, M> {
-        // we have a full pivots: [T; M]
-        // which we can split as lhs: [T; M/2], rhs: [T; M/2].
-        let mut lhs = self.pivots.as_mut_ptr().cast::<T>();
-        let rhs = unsafe { self.pivots.as_ptr().add(M / 2).cast::<T>() };
-
-        // // children is a full [Box<NodeArray<T, M>>; M+1]
-        // // iff child is not none.
-        // let children = &mut self.children as *mut _ as *mut Box<NodeArray<T, M>>;
+        debug_assert_eq!(self.len, M);
 
         // we are creating a new node,
         // the values being split off from rhs will be written here.
         let mut new_node = NodeArray {
             len: 0,
-            pivots: uninit_array::<T, M>(),
-            children: Children::<T, M>::uninit(),
+            pivots: DetachedArrayVec::new(),
+            children: Children::<T, M>::new(),
         };
 
-        let mut out_p = new_node.pivots.as_mut_ptr().cast::<T>();
-        // let mut out_c = &mut new_node.children as *mut _ as *mut Box<NodeArray<T, M>>;
-
         let mid = match usize::cmp(&index, &(M / 2)) {
-            std::cmp::Ordering::Equal => {
-                // in this case, lhs < value < rhs
-                // write rhs to out.
-                unsafe { rhs.copy_to_nonoverlapping(out_p, M / 2) }
+            std::cmp::Ordering::Equal => unsafe {
+                new_node.pivots = self.pivots.split_off(M, M / 2);
 
                 if let Some(child) = child {
-                    unsafe {
-                        new_node.children.head.write(Box::new(child));
-                        let out = new_node.children.tail.as_mut_ptr();
-                        let inp = self.children.tail.as_mut_ptr().add(M / 2);
-                        inp.copy_to_nonoverlapping(out, M / 2);
-                    }
+                    new_node.children.head.write(child);
+                    new_node.children.tail = self.children.tail.split_off(M, M / 2);
                 }
 
                 value
-            }
-            std::cmp::Ordering::Less => {
-                // in this case, value < rhs
-                // write rhs to out.
-                unsafe { rhs.copy_to_nonoverlapping(out_p, M / 2) }
-
-                if child.is_some() {
-                    unsafe {
-                        let inp = self.children.tail.as_mut_ptr().add(M / 2);
-
-                        new_node
-                            .children
-                            .head
-                            .write(inp.sub(1).read().assume_init());
-                        let out = new_node.children.tail.as_mut_ptr();
-                        inp.copy_to_nonoverlapping(out, M / 2);
-                    }
-                }
-
-                // let (lhs1, lhs2) = lhs.split_at(index);
-                // lhs1.len() == index;
-                // lhs2.len() == M/2-index;
-                // let lhs1 = lhs;
-                let lhs2 = unsafe { lhs.add(index) };
-
-                // last value of lhs2 is the midpoint
-                // let (mid, lhs2) = lhs2.split_last();
-                // lhs2.len() == M/2 - index - 1;
-                let mid = unsafe { lhs2.read() };
-                // let lhs2 = unsafe { lhs2.add(M / 2 - index - 1) };
-
-                // lhs = lhs1 || value || lhs2.
-                unsafe {
-                    lhs = lhs.add(index);
-                    lhs2.copy_to(lhs.add(1), M / 2 - index - 1);
-                    lhs.write(value);
-                }
+            },
+            std::cmp::Ordering::Less => unsafe {
+                new_node.pivots = self.pivots.split_off(M, M / 2);
+                let mid = self.pivots.pop(M / 2);
+                self.pivots.insert(M / 2 - 1, index, value);
 
                 if let Some(child) = child {
-                    // [Box<NodeArray<T, M>>; M/2 - 1]
-                    let mut lhs = self.children.tail.as_mut_ptr() as *mut Box<NodeArray<T, M>>;
-
-                    // let (lhs1, lhs2) = lhs.split_at(index);
-                    // lhs1.len() == index;
-                    // lhs2.len() == M/2 - index - 1;
-                    // let lhs1 = lhs;
-                    let lhs2 = unsafe { lhs.add(index) };
-
-                    // lhs = lhs1 || child || lhs2.
-                    unsafe {
-                        lhs = lhs.add(index);
-                        lhs2.copy_to(lhs.add(1), M / 2 - index - 1);
-                        lhs.write(Box::new(child));
-                    }
+                    new_node.children.tail = self.children.tail.split_off(M, M / 2);
+                    new_node.children.head.write(self.children.tail.pop(M / 2));
+                    self.children.tail.insert(M / 2 - 1, index, child);
                 }
 
                 mid
-            }
-            std::cmp::Ordering::Greater => {
-                // in this case, lhs < value, so leave lhs untouched.
-                let index = index - M / 2;
-
-                // let (rhs1, rhs2) = rhs.split_at(index);
-                // rhs1.len() == index;
-                // rhs2.len() == M/2-index;
-                let rhs1 = rhs;
-                let rhs2 = unsafe { rhs.add(index) };
-
-                // first value of rhs1 is the midpoint
-                // let (mid, rhs1) = rhs1.split_first();
-                // rhs1.len() == index - 1;
-                let mid = unsafe { rhs1.read() };
-                let rhs1 = unsafe { rhs1.add(1) };
-
-                // out = rhs1 || value || rhs2
-                unsafe {
-                    rhs1.copy_to_nonoverlapping(out_p, index - 1);
-                    out_p = out_p.add(index - 1);
-
-                    out_p.write(value);
-                    out_p = out_p.add(1);
-
-                    rhs2.copy_to_nonoverlapping(out_p, M / 2 - index);
-                }
+            },
+            std::cmp::Ordering::Greater => unsafe {
+                let index = index - M / 2 - 1;
+                new_node.pivots = self.pivots.split_off(M, M / 2 + 1);
+                let mid = self.pivots.pop(M / 2 + 1);
+                new_node.pivots.insert(M / 2 - 1, index, value);
 
                 if let Some(child) = child {
-                    // new_node.children.tail: [Box<NodeArray<T, M>>; M]
-                    let tail = self.children.tail.as_mut_ptr() as *mut Box<NodeArray<T, M>>;
-                    // rhs: [Box<NodeArray<T, M>>; M/2]
-                    let rhs = unsafe { tail.add(M / 2) };
-
-                    // let (rhs1, rhs2) = rhs.split_at(index);
-                    // rhs1.len() == index;
-                    // rhs2.len() == M/2-index;
-                    let rhs1 = rhs;
-                    let rhs2 = unsafe { rhs.add(index) };
-
-                    // first value of rhs1 is the head
-                    // let (head, rhs1) = rhs1.split_first();
-                    // rhs1.len() == index - 1;
-                    let head = unsafe { rhs1.read() };
-                    let rhs1 = unsafe { rhs1.add(1) };
-
-                    // out = rhs1 || child || rhs2
-                    let mut out_p =
-                        new_node.children.tail.as_mut_ptr() as *mut Box<NodeArray<T, M>>;
-                    unsafe {
-                        new_node.children.head.write(head);
-
-                        rhs1.copy_to_nonoverlapping(out_p, index - 1);
-                        out_p = out_p.add(index - 1);
-
-                        out_p.write(Box::new(child));
-                        out_p = out_p.add(1);
-
-                        rhs2.copy_to_nonoverlapping(out_p, M / 2 - index);
-                    }
+                    new_node.children.tail = self.children.tail.split_off(M, M / 2 + 1);
+                    new_node
+                        .children
+                        .head
+                        .write(self.children.tail.pop(M / 2 + 1));
+                    new_node.children.tail.insert(M / 2 - 1, index, child);
                 }
 
                 mid
-            }
+            },
         };
         self.len = M / 2;
         new_node.len = M / 2;
         InsertResult2::Propagate {
             pivot: mid,
-            right: new_node,
+            right: Box::new(new_node),
         }
     }
 
     fn insert(&mut self, value: T, height: usize) -> InsertResult2<T, M> {
         // SAFETY: `len` pivots are init
-        let pivots = unsafe { slice_assume_init_mut(&mut self.pivots[..self.len]) };
+        let pivots = unsafe { self.pivots.as_mut_slice(self.len) };
 
         let index = match pivots.binary_search_by(|pivot| pivot.cmp(&value)) {
             Ok(index) => {
@@ -268,17 +130,19 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
             if self.len == M {
                 self.rotate(index, value, None)
             } else {
-                // pivots: [T; self.len]
-                let pivots = self.pivots.as_mut_ptr().cast::<T>();
-                unsafe { insert(pivots, self.len, index, value) }
+                unsafe {
+                    self.pivots.insert(self.len, index, value);
+                    self.len += 1;
+                }
 
-                self.len += 1;
                 InsertResult2::Done
             }
         } else {
+            debug_assert!(self.len > 0, "non leaf nodes must have some children");
+
             let child = match index.checked_sub(1) {
                 None => unsafe { self.children.head.assume_init_mut() },
-                Some(index) => unsafe { self.children.tail[index].assume_init_mut() },
+                Some(index) => unsafe { &mut self.children.tail.as_mut_slice(self.len)[index] },
             };
 
             match child.insert(value, height - 1) {
@@ -286,21 +150,11 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
                     if self.len == M {
                         self.rotate(index, pivot, Some(right))
                     } else {
-                        // pivots: [T; self.len]
-                        let pivots = self.pivots.as_mut_ptr().cast::<T>();
-                        // children: [Box<NodeArray<T, M>>; self.len]
-                        let children = self
-                            .children
-                            .tail
-                            .as_mut_ptr()
-                            .cast::<Box<NodeArray<T, M>>>();
-
                         unsafe {
-                            insert(pivots, self.len, index, pivot);
-                            insert(children, self.len, index, Box::new(right));
-                        };
-
-                        self.len += 1;
+                            self.pivots.insert(self.len, index, pivot);
+                            self.children.tail.insert(self.len, index, right);
+                            self.len += 1;
+                        }
 
                         InsertResult2::Done
                     }
@@ -335,7 +189,7 @@ impl<T: std::fmt::Debug> std::fmt::Debug for OkBTree<T> {
 impl<T> Drop for OkBTree<T> {
     fn drop(&mut self) {
         if let Some(mut inner) = self.0.take() {
-            inner.node.drop_inner(inner.depth.get() - 1)
+            unsafe { inner.node.drop_inner(inner.depth.get() - 1) }
         }
     }
 }
@@ -349,7 +203,7 @@ impl<T: std::fmt::Debug, const M: usize> std::fmt::Debug for NodeArrayFmt<'_, T,
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut list = f.debug_list();
 
-        let pivots = unsafe { slice_assume_init(&self.array.pivots[..self.array.len]) };
+        let pivots = unsafe { self.array.pivots.as_slice(self.array.len) };
 
         if self.height == 0 {
             list.entries(pivots);
@@ -359,7 +213,7 @@ impl<T: std::fmt::Debug, const M: usize> std::fmt::Debug for NodeArrayFmt<'_, T,
                 array: unsafe { self.array.children.head.assume_init_ref() },
             });
 
-            let tail = unsafe { slice_assume_init(&self.array.children.tail[..self.array.len]) };
+            let tail = unsafe { self.array.children.tail.as_slice(self.array.len) };
             for (p, c) in std::iter::zip(pivots, tail) {
                 list.entry(p);
                 list.entry(&NodeArrayFmt {
@@ -373,7 +227,10 @@ impl<T: std::fmt::Debug, const M: usize> std::fmt::Debug for NodeArrayFmt<'_, T,
 }
 
 enum InsertResult2<T, const M: usize> {
-    Propagate { pivot: T, right: NodeArray<T, M> },
+    Propagate {
+        pivot: T,
+        right: Box<NodeArray<T, M>>,
+    },
     Done,
 }
 
@@ -389,15 +246,18 @@ impl<T: Ord> OkBTree<T> {
             match inner.node.insert(value, inner.depth.get() - 1) {
                 InsertResult2::Propagate { pivot, right } => {
                     let depth = inner.depth.checked_add(1).unwrap();
+                    dbg!(depth);
                     let mut node = NodeArray {
                         len: 1,
-                        pivots: uninit_array(),
-                        children: Children::uninit(),
+                        pivots: DetachedArrayVec::new(),
+                        children: Children::new(),
                     };
 
-                    node.pivots[0].write(pivot);
-                    node.children.head.write(inner.node);
-                    node.children.tail[0].write(Box::new(right));
+                    unsafe {
+                        node.pivots.push(0, pivot);
+                        node.children.head.write(inner.node);
+                        node.children.tail.push(0, right);
+                    }
 
                     self.0 = Some(BTreeInner {
                         depth,
@@ -409,14 +269,14 @@ impl<T: Ord> OkBTree<T> {
                 }
             }
         } else {
-            let mut pivots = uninit_array();
-            pivots[0].write(value);
+            let mut pivots = DetachedArrayVec::new();
+            unsafe { pivots.push(0, value) };
             self.0 = Some(BTreeInner {
                 depth: NonZeroUsize::new(1).unwrap(),
                 node: Box::new(NodeArray {
                     len: 1,
                     pivots,
-                    children: Children::uninit(),
+                    children: Children::new(),
                 }),
             });
         }
