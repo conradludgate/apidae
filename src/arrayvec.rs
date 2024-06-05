@@ -137,13 +137,13 @@ impl<T, const CAP: usize> DetachedArrayVec<T, CAP> {
 
     unsafe fn drain_range(&mut self, len: usize, start: usize, end: usize) -> Drain<T, CAP> {
         if cfg!(debug_assertions) {
-            if start <= end {
+            if start > end {
                 panic_oob!("drain", start, end)
             }
-            if end <= len {
+            if end > len {
                 panic_oob!("drain", end, len)
             }
-            if len <= CAP {
+            if len > CAP {
                 panic_oob!("drain", len, CAP)
             }
         }

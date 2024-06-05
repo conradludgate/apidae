@@ -4,8 +4,8 @@ use arrayvec::DetachedArrayVec;
 
 mod arrayvec;
 
-const M: usize = 8;
-// const M: usize = 2;
+// const M: usize = 8;
+const M: usize = 2;
 
 impl<T, const M: usize> Children<T, M> {
     const fn new() -> Self {
@@ -52,7 +52,7 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
         index: usize,
         value: T,
         child: Option<Box<NodeArray<T, M>>>,
-    ) -> InsertResult2<T, M> {
+    ) -> InsertResult<T, M> {
         debug_assert_eq!(self.len, M);
         debug_assert!(M >= 2);
 
@@ -108,37 +108,27 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
         };
         self.len = M / 2;
         new_node.len = M / 2;
-        InsertResult2::Propagate {
+        InsertResult::Propagate {
             pivot: mid,
             right: Box::new(new_node),
         }
     }
 
-    fn insert(&mut self, value: T, height: usize) -> InsertResult2<T, M> {
+    fn insert(&mut self, mut value: T, height: usize) -> InsertResult<T, M> {
         // SAFETY: `len` pivots are init
         let pivots = unsafe { self.pivots.as_mut_slice(self.len) };
 
         let index = match pivots.binary_search_by(|pivot| pivot.cmp(&value)) {
             Ok(index) => {
                 pivots[index] = value;
-                return InsertResult2::Done;
+                return InsertResult::Done;
             }
             Err(index) => index,
         };
 
-        if height == 0 {
-            // leaf node
-            if self.len == M {
-                self.rotate(index, value, None)
-            } else {
-                unsafe {
-                    self.pivots.insert(self.len, index, value);
-                    self.len += 1;
-                }
-
-                InsertResult2::Done
-            }
-        } else {
+        let mut new_child = None;
+        // if this is an internal node, try and insert into the children
+        if height > 0 {
             debug_assert!(self.len > 0, "non leaf nodes must have some children");
 
             let child = match index.checked_sub(1) {
@@ -147,21 +137,26 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
             };
 
             match child.insert(value, height - 1) {
-                InsertResult2::Propagate { pivot, right } => {
-                    if self.len == M {
-                        self.rotate(index, pivot, Some(right))
-                    } else {
-                        unsafe {
-                            self.pivots.insert(self.len, index, pivot);
-                            self.children.tail.insert(self.len, index, right);
-                            self.len += 1;
-                        }
-
-                        InsertResult2::Done
-                    }
+                InsertResult::Done => return InsertResult::Done,
+                InsertResult::Propagate { pivot, right } => {
+                    value = pivot;
+                    new_child = Some(right);
                 }
-                InsertResult2::Done => InsertResult2::Done,
             }
+        }
+
+        if self.len == M {
+            self.rotate(index, value, new_child)
+        } else {
+            unsafe {
+                self.pivots.insert(self.len, index, value);
+                if let Some(child) = new_child {
+                    self.children.tail.insert(self.len, index, child);
+                }
+                self.len += 1;
+            }
+
+            InsertResult::Done
         }
     }
 }
@@ -227,7 +222,7 @@ impl<T: std::fmt::Debug, const M: usize> std::fmt::Debug for NodeArrayFmt<'_, T,
     }
 }
 
-enum InsertResult2<T, const M: usize> {
+enum InsertResult<T, const M: usize> {
     Propagate {
         pivot: T,
         right: Box<NodeArray<T, M>>,
@@ -245,9 +240,8 @@ impl<T: Ord> OkBTree<T> {
     pub fn insert(&mut self, value: T) {
         if let Some(mut inner) = self.0.take() {
             match inner.node.insert(value, inner.depth.get() - 1) {
-                InsertResult2::Propagate { pivot, right } => {
+                InsertResult::Propagate { pivot, right } => {
                     let depth = inner.depth.checked_add(1).unwrap();
-                    dbg!(depth);
                     let mut node = NodeArray {
                         len: 1,
                         pivots: DetachedArrayVec::new(),
@@ -265,7 +259,7 @@ impl<T: Ord> OkBTree<T> {
                         node: Box::new(node),
                     })
                 }
-                InsertResult2::Done => {
+                InsertResult::Done => {
                     self.0 = Some(inner);
                 }
             }
@@ -288,6 +282,11 @@ impl<T> Default for OkBTree<T> {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[inline(never)]
+pub fn insert_i32(x: &mut OkBTree<i32>) {
+    x.insert(1);
 }
 
 #[cfg(test)]
