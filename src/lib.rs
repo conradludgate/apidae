@@ -165,7 +165,7 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
         // SAFETY: `len` pivots are init
         let pivots = unsafe { self.pivots.as_mut_slice(self.len) };
 
-        let index = match pivots.binary_search_by(|pivot| pivot.cmp(&value)) {
+        let index = match Comp::from_comp(&value).binary_search(pivots, height) {
             Ok(index) => {
                 pivots[index] = value;
                 return InsertResult::Done;
@@ -295,6 +295,97 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
                             self.len += 1;
                         }
                         Ok(last)
+                    }
+                }
+            }
+        }
+    }
+
+    // ok - no underflow
+    // err - underflow
+    fn remove<B: BinarySearch<T>>(&mut self, height: usize, b: &B) -> Result<T, T> {
+        assert!(Self::__M_IS_GREATER_THAN_ONE);
+        assert!(Self::__M_IS_EVEN);
+
+        // SAFETY: `len` pivots are init
+        let pivots = unsafe { self.pivots.as_mut_slice(self.len) };
+
+        match b.binary_search(pivots, height) {
+            Ok(index) => {
+                let value = unsafe { self.pivots.remove(self.len, index) };
+                self.len -= 1;
+                if self.len < M / 2 {
+                    Err(value)
+                } else {
+                    Ok(value)
+                }
+            }
+            Err(index) => {
+                let child = self.children.get_mut(self.len, index);
+                match child.remove_last(height - 1) {
+                    Ok(last) => Ok(last),
+                    Err(last) => {
+                        let index = match index.checked_sub(1) {
+                            // SAFETY: head is always init when height > 0
+                            None => unsafe {
+                                let new_head = self.children.tail.remove(self.len, 0);
+                                let mut first_child = std::mem::replace(self.children.head.assume_init_mut(), new_head);
+
+                                todo!()
+                            },
+                            Some(index) => index,
+                        };
+
+                        let mut child = unsafe { self.children.tail.remove(self.len, index) };
+                        let pivot = unsafe { self.pivots.remove(self.len, index) };
+                        self.len -= 1;
+
+                        debug_assert_eq!(child.len, M / 2 - 1);
+
+                        let prev_child = self.children.get_mut(self.len, index);
+                        // we can merge
+                        if prev_child.len == M / 2 {
+                            debug_assert_eq!(prev_child.len + child.len + 1, M);
+                            unsafe {
+                                prev_child.pivots.push(M / 2, pivot);
+                                for (i, pivot) in child.pivots.into_iter(M / 2 - 1).enumerate()
+                                {
+                                    prev_child.pivots.push(M / 2 + 1 + i, pivot);
+                                }
+                                if height > 1 {
+                                    prev_child
+                                        .children
+                                        .tail
+                                        .push(M / 2, child.children.head.assume_init_read());
+                                    for (i, child) in
+                                        child.children.tail.into_iter(M / 2 - 1).enumerate()
+                                    {
+                                        prev_child.children.tail.push(M / 2 + 1 + i, child);
+                                    }
+                                }
+                                prev_child.len = M;
+                            }
+
+                            if self.len < M / 2 {
+                                Err(last)
+                            } else {
+                                Ok(last)
+                            }
+                        } else {
+                            unsafe {
+                                // prev_child cannot underflow on removal.
+                                let new_pivot =
+                                    prev_child.remove_last(height - 1).unwrap_unchecked();
+
+                                child.pivots.insert(M / 2 - 1, 0, pivot);
+
+                                self.children.tail.push(self.len, child);
+                                self.pivots.push(self.len, new_pivot);
+
+                                self.len += 1;
+                            }
+                            Ok(last)
+                        }
                     }
                 }
             }
@@ -491,7 +582,7 @@ impl<T: Ord> OkBTree<T> {
             if inner.node.len == 0 {
                 return None;
             };
-            match inner.node.remove_last(inner.depth.get() - 1) {
+            match inner.node.remove(inner.depth.get() - 1, &Last) {
                 Ok(val) => Some(val),
                 Err(val) => {
                     if inner.node.len == 0 && inner.depth.get() > 1 {
