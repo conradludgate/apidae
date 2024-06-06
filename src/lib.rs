@@ -264,11 +264,30 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
                 let index = match index.checked_sub(1) {
                     // SAFETY: head is always init when height > 0
                     None => unsafe {
-                        let new_head = self.children.tail.remove(self.len, 0);
-                        let mut first_child =
-                            std::mem::replace(self.children.head.assume_init_mut(), new_head);
+                        let child = self.children.head.assume_init_mut();
+                        let next_child = &mut self.children.tail.as_mut_slice(self.len)[0];
+                        let pivot = &mut pivots[0];
 
-                        todo!()
+                        if next_child.len > M / 2 {
+                            Self::rotate_left(height, child, pivot, next_child);
+                            return Some(RemoveResult::Done(value));
+                        }
+
+                        // we can only merge
+                        let child =
+                            std::mem::replace(child, self.children.tail.remove(self.len, 0));
+                        let pivot = self.pivots.remove(self.len, 0);
+                        self.len -= 1;
+
+                        let next_child = self.children.head.assume_init_mut();
+
+                        Self::merge_left(height, *child, pivot, next_child);
+
+                        if self.len < M / 2 {
+                            return Some(RemoveResult::Underflow(value));
+                        } else {
+                            return Some(RemoveResult::Done(value));
+                        }
                     },
                     Some(index) => index,
                 };
@@ -327,7 +346,7 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
                 self.len -= 1;
 
                 let prev_child = self.children.get_mut(self.len, index);
-                Self::merge(height, prev_child, pivot, *child);
+                Self::merge_right(height, prev_child, pivot, *child);
 
                 if self.len < M / 2 {
                     Some(RemoveResult::Underflow(value))
@@ -338,7 +357,7 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
         }
     }
 
-    fn merge(height: usize, lhs: &mut NodeArray<T, M>, pivot: T, rhs: NodeArray<T, M>) {
+    fn merge_right(height: usize, lhs: &mut NodeArray<T, M>, pivot: T, rhs: NodeArray<T, M>) {
         debug_assert_eq!(lhs.len + rhs.len + 1, M);
         unsafe {
             lhs.pivots.push(M / 2, pivot);
@@ -351,6 +370,28 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
                     .push(M / 2, rhs.children.head.assume_init_read());
                 for (i, child) in rhs.children.tail.into_iter(M / 2 - 1).enumerate() {
                     lhs.children.tail.push(M / 2 + 1 + i, child);
+                }
+            }
+            lhs.len = M;
+        }
+    }
+
+    fn merge_left(height: usize, lhs: NodeArray<T, M>, pivot: T, rhs: &mut NodeArray<T, M>) {
+        debug_assert_eq!(lhs.len + rhs.len + 1, M);
+        let x = std::mem::replace(rhs, lhs);
+        let (lhs, rhs) = (rhs, x);
+
+        unsafe {
+            lhs.pivots.push(M / 2 - 1, pivot);
+            for (i, pivot) in rhs.pivots.into_iter(M / 2).enumerate() {
+                lhs.pivots.push(M / 2 + i, pivot);
+            }
+            if height > 1 {
+                lhs.children
+                    .tail
+                    .push(M / 2 - 1, rhs.children.head.assume_init_read());
+                for (i, child) in rhs.children.tail.into_iter(M / 2).enumerate() {
+                    lhs.children.tail.push(M / 2 + i, child);
                 }
             }
             lhs.len = M;
@@ -543,12 +584,12 @@ impl<T: Ord> OkBTree<T> {
         inner.node.search(inner.depth.get() - 1, &First)
     }
 
-    pub fn remove_last(&mut self) -> Option<T> {
+    fn remove_inner<B: BinarySearch<T>>(&mut self, b: &B) -> Option<T> {
         if let Some(inner) = &mut self.0 {
             if inner.node.len == 0 {
                 return None;
             };
-            match inner.node.remove(inner.depth.get() - 1, &Last)? {
+            match inner.node.remove(inner.depth.get() - 1, b)? {
                 RemoveResult::Done(val) => Some(val),
                 RemoveResult::Underflow(val) => {
                     if inner.node.len == 0 && inner.depth.get() > 1 {
@@ -562,6 +603,18 @@ impl<T: Ord> OkBTree<T> {
         } else {
             None
         }
+    }
+
+    pub fn remove_last(&mut self) -> Option<T> {
+        self.remove_inner(&Last)
+    }
+
+    pub fn remove_first(&mut self) -> Option<T> {
+        self.remove_inner(&First)
+    }
+
+    pub fn remove<Q: Comparable<T>>(&mut self, q: &Q) -> Option<T> {
+        self.remove_inner(Comp::from_comp(q))
     }
 
     pub fn insert(&mut self, value: T) {
@@ -627,41 +680,55 @@ mod test {
     use crate::OkBTree;
 
     #[test]
-    fn insert() {
+    fn get() {
         let mut btree = OkBTree::new();
-        btree.insert(1);
-        dbg!(&btree);
-        btree.insert(2);
-        dbg!(&btree);
-        btree.insert(3);
-        dbg!(&btree);
-        btree.insert(4);
-        dbg!(&btree);
-        btree.insert(5);
-        dbg!(&btree);
-        btree.insert(6);
-        dbg!(&btree);
-        btree.insert(7);
-        dbg!(&btree);
-        btree.insert(8);
-        dbg!(&btree);
-        btree.insert(9);
-        dbg!(&btree);
-        btree.insert(10);
-        dbg!(&btree);
-        btree.insert(11);
-        dbg!(&btree);
+        for i in 50..100 {
+            btree.insert(i);
+        }
 
-        assert!(btree.get(&8).is_some());
-        assert!(btree.get(&12).is_none());
+        for i in 50..100 {
+            assert_eq!(btree.get(&i), Some(&i));
+        }
+
+        assert!(btree.get(&49).is_none());
+        assert!(btree.get(&100).is_none());
         assert!(btree.get(&0).is_none());
 
-        dbg!(btree.first());
-        dbg!(btree.last());
+        assert_eq!(btree.first(), Some(&50));
+        assert_eq!(btree.last(), Some(&99));
+    }
 
-        for _ in 1..=11 {
-            dbg!(btree.remove_last());
-            dbg!(&btree);
+    #[test]
+    fn remove_last() {
+        let mut btree = OkBTree::new();
+        for i in 0..100 {
+            btree.insert(i);
+        }
+
+        for i in (0..100).rev() {
+            assert_eq!(btree.remove_last(), Some(i));
+        }
+    }
+    #[test]
+    fn remove_first() {
+        let mut btree = OkBTree::new();
+        for i in 0..100 {
+            btree.insert(i);
+        }
+
+        for i in 0..100 {
+            assert_eq!(btree.remove_first(), Some(i));
+        }
+    }
+    #[test]
+    fn remove() {
+        let mut btree = OkBTree::new();
+        for i in 0..100 {
+            btree.insert(i);
+        }
+
+        for i in 0..100 {
+            assert_eq!(btree.remove(&i), Some(i));
         }
     }
 }

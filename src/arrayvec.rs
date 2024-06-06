@@ -1,6 +1,5 @@
 use std::mem;
 use std::mem::MaybeUninit;
-use std::ops::{Bound, RangeBounds};
 use std::ptr;
 use std::slice;
 
@@ -62,7 +61,8 @@ impl<T, const CAP: usize> DetachedArrayVec<T, CAP> {
 
     /// Get pointer to where element at `index` would be
     unsafe fn get_unchecked_ptr(&mut self, index: usize) -> *mut T {
-        self.as_mut_ptr().add(index)
+        debug_assert!(index <= self.len);
+        unsafe { self.as_mut_ptr().add(index) }
     }
 
     /// Insert `element` at position `index`.
@@ -251,7 +251,7 @@ impl<T, const CAP: usize> DetachedArrayVec<T, CAP> {
             self.len += 1;
         }
 
-        ptr::write(self.as_mut_ptr().add(len), element);
+        unsafe { ptr::write(self.as_mut_ptr().add(len), element); }
     }
 
     pub unsafe fn pop(&mut self, len: usize) -> T {
@@ -269,7 +269,7 @@ impl<T, const CAP: usize> DetachedArrayVec<T, CAP> {
     }
 
     pub unsafe fn clear(&mut self, len: usize) {
-        self.truncate(len, 0)
+        unsafe { self.truncate(len, 0) }
     }
 
     pub unsafe fn truncate(&mut self, old_len: usize, new_len: usize) {
@@ -350,7 +350,6 @@ impl<T, const CAP: usize> Drop for IntoIter<T, CAP> {
         let index = self.index;
         let len = self.len;
         unsafe {
-            self.len = 0;
             let elements = slice::from_raw_parts_mut(self.v.get_unchecked_ptr(index), len - index);
             ptr::drop_in_place(elements);
         }
