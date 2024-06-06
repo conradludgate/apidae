@@ -207,14 +207,14 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
         }
     }
 
-    fn search<Q: Comparable<T>>(&self, height: usize, q: &Q) -> Option<&T> {
+    fn search<B: BinarySearch<T>>(&self, height: usize, b: &B) -> Option<&T> {
         assert!(Self::__M_IS_GREATER_THAN_ONE);
         assert!(Self::__M_IS_EVEN);
 
         // SAFETY: `len` pivots are init
         let pivots = unsafe { self.pivots.as_slice(self.len) };
 
-        let index = match pivots.binary_search_by(|pivot| q.compare(pivot).reverse()) {
+        let index = match b.binary_search(pivots, height) {
             Ok(index) => return Some(&pivots[index]),
             Err(index) => index,
         };
@@ -226,7 +226,7 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
         debug_assert!(self.len > 0, "non leaf nodes must have some children");
         let child = self.children.get(self.len, index);
 
-        child.search(height - 1, q)
+        child.search(height - 1, b)
     }
 
     // ok - no underflow
@@ -340,6 +340,51 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
     // }
 }
 
+trait BinarySearch<K> {
+    /// Compare self to `key` and return their ordering.
+    fn binary_search(&self, pivots: &[K], height: usize) -> Result<usize, usize>;
+}
+
+impl<K, Q: Comparable<K>> BinarySearch<K> for Comp<Q> {
+    fn binary_search(&self, pivots: &[K], _height: usize) -> Result<usize, usize> {
+        pivots.binary_search_by(|pivot| self.0.compare(pivot).reverse())
+    }
+}
+
+#[repr(transparent)]
+struct Comp<Q>(Q);
+
+impl<Q> Comp<Q> {
+    fn from_comp(q: &Q) -> &Self {
+        // SAFETY: transparent wrapper
+        unsafe { std::mem::transmute(q) }
+    }
+}
+
+struct Last;
+
+impl<K> BinarySearch<K> for Last {
+    fn binary_search(&self, pivots: &[K], height: usize) -> Result<usize, usize> {
+        if height == 0 && !pivots.is_empty() {
+            Ok(pivots.len() - 1)
+        } else {
+            Err(pivots.len())
+        }
+    }
+}
+
+struct First;
+
+impl<K> BinarySearch<K> for First {
+    fn binary_search(&self, pivots: &[K], height: usize) -> Result<usize, usize> {
+        if height == 0 && !pivots.is_empty() {
+            Ok(0)
+        } else {
+            Err(0)
+        }
+    }
+}
+
 pub struct OkBTree<T>(Option<BTreeInner<T>>);
 
 pub struct BTreeInner<T> {
@@ -430,7 +475,15 @@ impl<T> OkBTree<T> {
 impl<T: Ord> OkBTree<T> {
     pub fn get<Q: Comparable<T>>(&self, q: &Q) -> Option<&T> {
         let inner = self.0.as_ref()?;
-        inner.node.search(inner.depth.get() - 1, q)
+        inner.node.search(inner.depth.get() - 1, Comp::from_comp(q))
+    }
+    pub fn last(&self) -> Option<&T> {
+        let inner = self.0.as_ref()?;
+        inner.node.search(inner.depth.get() - 1, &Last)
+    }
+    pub fn first(&self) -> Option<&T> {
+        let inner = self.0.as_ref()?;
+        inner.node.search(inner.depth.get() - 1, &First)
     }
 
     pub fn remove_last(&mut self) -> Option<T> {
@@ -545,6 +598,9 @@ mod test {
         assert!(btree.get(&8).is_some());
         assert!(btree.get(&12).is_none());
         assert!(btree.get(&0).is_none());
+
+        dbg!(btree.first());
+        dbg!(btree.last());
 
         for _ in 1..=11 {
             dbg!(btree.remove_last());
