@@ -253,118 +253,149 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
                     return None;
                 }
 
-                let child = self.children.get_mut(self.len, index);
-                match child.remove(height - 1, b)? {
-                    RemoveResult::Done(last) => Some(RemoveResult::Done(last)),
-                    RemoveResult::Underflow(last) => {
-                        let index = match index.checked_sub(1) {
-                            // SAFETY: head is always init when height > 0
-                            None => unsafe {
-                                let new_head = self.children.tail.remove(self.len, 0);
-                                let mut first_child = std::mem::replace(
-                                    self.children.head.assume_init_mut(),
-                                    new_head,
-                                );
-
-                                todo!()
-                            },
-                            Some(index) => index,
-                        };
-
-                        let mut child = unsafe { self.children.tail.remove(self.len, index) };
-                        let pivot = unsafe { self.pivots.remove(self.len, index) };
-                        self.len -= 1;
-
-                        debug_assert_eq!(child.len, M / 2 - 1);
-
-                        let prev_child = self.children.get_mut(self.len, index);
-                        // we can merge
-                        if prev_child.len == M / 2 {
-                            debug_assert_eq!(prev_child.len + child.len + 1, M);
-                            unsafe {
-                                prev_child.pivots.push(M / 2, pivot);
-                                for (i, pivot) in child.pivots.into_iter(M / 2 - 1).enumerate() {
-                                    prev_child.pivots.push(M / 2 + 1 + i, pivot);
-                                }
-                                if height > 1 {
-                                    prev_child
-                                        .children
-                                        .tail
-                                        .push(M / 2, child.children.head.assume_init_read());
-                                    for (i, child) in
-                                        child.children.tail.into_iter(M / 2 - 1).enumerate()
-                                    {
-                                        prev_child.children.tail.push(M / 2 + 1 + i, child);
-                                    }
-                                }
-                                prev_child.len = M;
-                            }
-
-                            if self.len < M / 2 {
-                                Some(RemoveResult::Underflow(last))
-                            } else {
-                                Some(RemoveResult::Done(last))
-                            }
-                        } else {
-                            unsafe {
-                                let new_pivot = match prev_child.remove(height - 1, &Last) {
-                                    Some(RemoveResult::Done(p)) => p,
-                                    // SAFETY: prev_child cannot underflow on removal.
-                                    _ => unreachable_unchecked(),
-                                };
-
-                                child.pivots.insert(M / 2 - 1, 0, pivot);
-
-                                self.children.tail.push(self.len, child);
-                                self.pivots.push(self.len, new_pivot);
-
-                                self.len += 1;
-                            }
-                            Some(RemoveResult::Done(last))
-                        }
+                let value = {
+                    let child = self.children.get_mut(self.len, index);
+                    match child.remove(height - 1, b)? {
+                        RemoveResult::Done(value) => return Some(RemoveResult::Done(value)),
+                        RemoveResult::Underflow(value) => value,
                     }
+                };
+
+                let index = match index.checked_sub(1) {
+                    // SAFETY: head is always init when height > 0
+                    None => unsafe {
+                        let new_head = self.children.tail.remove(self.len, 0);
+                        let mut first_child =
+                            std::mem::replace(self.children.head.assume_init_mut(), new_head);
+
+                        todo!()
+                    },
+                    Some(index) => index,
+                };
+
+                let pivots = unsafe { self.pivots.as_mut_slice(self.len) };
+                // debug_assert_eq!(child.len, M / 2 - 1);
+
+                // check the right sibling first
+                if index + 1 < self.len {
+                    let children = unsafe { self.children.tail.as_mut_slice(self.len) };
+                    let [child, next_child] = &mut children[index..index + 2] else {
+                        unsafe { unreachable_unchecked() }
+                    };
+                    let pivot = &mut pivots[index + 1];
+
+                    if next_child.len > M / 2 {
+                        Self::rotate_left(height, child, pivot, next_child);
+                        return Some(RemoveResult::Done(value));
+                    }
+                }
+
+                {
+                    let [prev_child, child] = {
+                        match index.checked_sub(1) {
+                            None => unsafe {
+                                [
+                                    self.children.head.assume_init_mut(),
+                                    self.children
+                                        .tail
+                                        .as_mut_slice(self.len)
+                                        .first_mut()
+                                        .unwrap_unchecked(),
+                                ]
+                            },
+                            Some(index) => unsafe {
+                                let children = self.children.tail.as_mut_slice(self.len);
+                                let x: &mut [_; 2] = (&mut children[index..index + 2])
+                                    .try_into()
+                                    .unwrap_unchecked();
+                                x.each_mut()
+                            },
+                        }
+                    };
+                    let pivot = &mut pivots[index];
+
+                    if prev_child.len > M / 2 {
+                        Self::rotate_right(height, prev_child, pivot, child);
+                        return Some(RemoveResult::Done(value));
+                    }
+                }
+
+                // we can only merge
+
+                let child = unsafe { self.children.tail.remove(self.len, index) };
+                let pivot = unsafe { self.pivots.remove(self.len, index) };
+                self.len -= 1;
+
+                let prev_child = self.children.get_mut(self.len, index);
+                Self::merge(height, prev_child, pivot, *child);
+
+                if self.len < M / 2 {
+                    Some(RemoveResult::Underflow(value))
+                } else {
+                    Some(RemoveResult::Done(value))
                 }
             }
         }
     }
 
-    // fn remove<Q: Comparable<T>>(&mut self, height: usize, q: &Q) -> RemoveResult<T> {
-    //     assert!(Self::__M_IS_GREATER_THAN_ONE);
-    //     assert!(Self::__M_IS_EVEN);
+    fn merge(height: usize, lhs: &mut NodeArray<T, M>, pivot: T, rhs: NodeArray<T, M>) {
+        debug_assert_eq!(lhs.len + rhs.len + 1, M);
+        unsafe {
+            lhs.pivots.push(M / 2, pivot);
+            for (i, pivot) in rhs.pivots.into_iter(M / 2 - 1).enumerate() {
+                lhs.pivots.push(M / 2 + 1 + i, pivot);
+            }
+            if height > 1 {
+                lhs.children
+                    .tail
+                    .push(M / 2, rhs.children.head.assume_init_read());
+                for (i, child) in rhs.children.tail.into_iter(M / 2 - 1).enumerate() {
+                    lhs.children.tail.push(M / 2 + 1 + i, child);
+                }
+            }
+            lhs.len = M;
+        }
+    }
 
-    //     // SAFETY: `len` pivots are init
-    //     let pivots = unsafe { self.pivots.as_slice(self.len) };
+    fn rotate_right(
+        height: usize,
+        lhs: &mut NodeArray<T, M>,
+        pivot: &mut T,
+        rhs: &mut NodeArray<T, M>,
+    ) {
+        debug_assert!(lhs.len > M / 2);
+        debug_assert_eq!(rhs.len, M / 2 - 1);
+        unsafe {
+            let new = match lhs.remove(height - 1, &Last) {
+                Some(RemoveResult::Done(p)) => p,
+                // SAFETY: lhs cannot underflow on removal.
+                _ => unreachable_unchecked(),
+            };
 
-    //     let index = match pivots.binary_search_by(|pivot| q.compare(pivot).reverse()) {
-    //         Ok(index) => {
-    //             if height == 0 {
-    //                 let value = unsafe { self.pivots.remove(self.len, index) };
-    //                 self.len -= 1;
-    //                 if self.len < M / 2 {
-    //                     return RemoveResult::Underflow(value);
-    //                 } else {
-    //                     return RemoveResult::Done(value);
-    //                 }
-    //             } else {
-    //             }
-    //         }
-    //         Err(index) => index,
-    //     };
+            let old = std::mem::replace(pivot, new);
+            rhs.pivots.insert(M / 2 - 1, 0, old);
+        }
+    }
 
-    //     if height == 0 {
-    //         return RemoveResult::None;
-    //     }
+    fn rotate_left(
+        height: usize,
+        lhs: &mut NodeArray<T, M>,
+        pivot: &mut T,
+        rhs: &mut NodeArray<T, M>,
+    ) {
+        debug_assert!(rhs.len > M / 2);
+        debug_assert_eq!(lhs.len, M / 2 - 1);
+        unsafe {
+            let new = match rhs.remove(height - 1, &First) {
+                Some(RemoveResult::Done(p)) => p,
+                // SAFETY: rhs cannot underflow on removal.
+                _ => unreachable_unchecked(),
+            };
 
-    //     debug_assert!(self.len > 0, "non leaf nodes must have some children");
-    //     let child = match index.checked_sub(1) {
-    //         // SAFETY: head is always init when height > 0
-    //         None => unsafe { self.children.head.assume_init_ref() },
-    //         // SAFETY: len children are init
-    //         Some(index) => unsafe { &self.children.tail.as_slice(self.len)[index] },
-    //     };
-
-    //     child.search(height - 1, q)
-    // }
+            let old = std::mem::replace(pivot, new);
+            lhs.pivots.push(M / 2 - 1, old);
+        }
+    }
 }
 
 trait BinarySearch<K> {
