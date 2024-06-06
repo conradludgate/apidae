@@ -7,8 +7,8 @@ use equivalent::Comparable;
 
 mod arrayvec;
 
-const M: usize = 8;
-// const M: usize = 2;
+// const M: usize = 8;
+const M: usize = 2;
 
 impl<T, const M: usize> Children<T, M> {
     const fn new() -> Self {
@@ -56,9 +56,32 @@ struct Children<T, const M: usize> {
     tail: DetachedArrayVec<Box<NodeArray<T, M>>, M>,
 }
 
+impl<T, const M: usize> Children<T, M> {
+    fn get(&self, len: usize, index: usize) -> &NodeArray<T, M> {
+        match index.checked_sub(1) {
+            // SAFETY: head is always init when height > 0
+            None => unsafe { self.head.assume_init_ref() },
+            // SAFETY: tail len are init
+            Some(index) => unsafe { &self.tail.as_slice(len)[index] },
+        }
+    }
+    fn get_mut(&mut self, len: usize, index: usize) -> &mut NodeArray<T, M> {
+        match index.checked_sub(1) {
+            // SAFETY: head is always init when height > 0
+            None => unsafe { self.head.assume_init_mut() },
+            // SAFETY: tail len are init
+            Some(index) => unsafe { &mut self.tail.as_mut_slice(len)[index] },
+        }
+    }
+}
+
 impl<T: Ord, const M: usize> NodeArray<T, M> {
     const __M_IS_GREATER_THAN_ONE: bool = {
-        assert!(M > 2, "The fanout factor, M, must be greater than one");
+        assert!(M > 1, "The fanout factor, M, must be greater than one");
+        true
+    };
+    const __M_IS_EVEN: bool = {
+        assert!(M % 2 == 0, "The fanout factor, M, must be even");
         true
     };
 
@@ -75,7 +98,7 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
         let m2 = M / 2;
         let m2m1 = m2 - 1;
         let m2p1 = m2 + 1;
-        assert!(m2p1 < M);
+        assert!(m2p1 <= M);
         assert!(m2 > 0);
 
         // we are creating a new node,
@@ -137,6 +160,7 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
 
     fn insert(&mut self, mut value: T, height: usize) -> InsertResult<T, M> {
         assert!(Self::__M_IS_GREATER_THAN_ONE);
+        assert!(Self::__M_IS_EVEN);
 
         // SAFETY: `len` pivots are init
         let pivots = unsafe { self.pivots.as_mut_slice(self.len) };
@@ -154,12 +178,7 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
         if height > 0 {
             debug_assert!(self.len > 0, "non leaf nodes must have some children");
 
-            let child = match index.checked_sub(1) {
-                // SAFETY: head is always init when height > 0
-                None => unsafe { self.children.head.assume_init_mut() },
-                // SAFETY: len children are init
-                Some(index) => unsafe { &mut self.children.tail.as_mut_slice(self.len)[index] },
-            };
+            let child = self.children.get_mut(self.len, index);
 
             match child.insert(value, height - 1) {
                 InsertResult::Done => return InsertResult::Done,
@@ -190,6 +209,7 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
 
     fn search<Q: Comparable<T>>(&self, height: usize, q: &Q) -> Option<&T> {
         assert!(Self::__M_IS_GREATER_THAN_ONE);
+        assert!(Self::__M_IS_EVEN);
 
         // SAFETY: `len` pivots are init
         let pivots = unsafe { self.pivots.as_slice(self.len) };
@@ -204,15 +224,120 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
         }
 
         debug_assert!(self.len > 0, "non leaf nodes must have some children");
-        let child = match index.checked_sub(1) {
-            // SAFETY: head is always init when height > 0
-            None => unsafe { self.children.head.assume_init_ref() },
-            // SAFETY: len children are init
-            Some(index) => unsafe { &self.children.tail.as_slice(self.len)[index] },
-        };
+        let child = self.children.get(self.len, index);
 
         child.search(height - 1, q)
     }
+
+    // ok - no underflow
+    // err - underflow
+    fn remove_last(&mut self, height: usize) -> Result<T, T> {
+        assert!(Self::__M_IS_GREATER_THAN_ONE);
+        assert!(Self::__M_IS_EVEN);
+
+        if height == 0 {
+            let value = unsafe { self.pivots.pop(self.len) };
+            self.len -= 1;
+            if self.len < M / 2 {
+                Err(value)
+            } else {
+                Ok(value)
+            }
+        } else {
+            let children = unsafe { self.children.tail.as_mut_slice(self.len) };
+            match children.last_mut().unwrap().remove_last(height - 1) {
+                Ok(last) => Ok(last),
+                Err(last) => {
+                    let mut last_child = unsafe { self.children.tail.pop(self.len) };
+                    let last_pivot = unsafe { self.pivots.pop(self.len) };
+                    self.len -= 1;
+
+                    debug_assert_eq!(last_child.len, M / 2 - 1);
+
+                    let prev_child = self.children.get_mut(self.len, self.len);
+                    // we can merge
+                    if prev_child.len == M / 2 {
+                        debug_assert_eq!(prev_child.len + last_child.len + 1, M);
+                        unsafe {
+                            prev_child.pivots.push(M / 2, last_pivot);
+                            for (i, pivot) in last_child.pivots.into_iter(M / 2 - 1).enumerate() {
+                                prev_child.pivots.push(M / 2 + 1 + i, pivot);
+                            }
+                            if height > 1 {
+                                prev_child
+                                    .children
+                                    .tail
+                                    .push(M / 2, last_child.children.head.assume_init_read());
+                                for (i, child) in
+                                    last_child.children.tail.into_iter(M / 2 - 1).enumerate()
+                                {
+                                    prev_child.children.tail.push(M / 2 + 1 + i, child);
+                                }
+                            }
+                            prev_child.len = M;
+                        }
+
+                        if self.len < M / 2 {
+                            Err(last)
+                        } else {
+                            Ok(last)
+                        }
+                    } else {
+                        unsafe {
+                            // prev_child cannot underflow on removal.
+                            let new_pivot = prev_child.remove_last(height - 1).unwrap_unchecked();
+
+                            last_child.pivots.insert(M / 2 - 1, 0, last_pivot);
+
+                            self.children.tail.push(self.len, last_child);
+                            self.pivots.push(self.len, new_pivot);
+
+                            self.len += 1;
+                        }
+                        Ok(last)
+                    }
+                }
+            }
+        }
+    }
+
+    // fn remove<Q: Comparable<T>>(&mut self, height: usize, q: &Q) -> RemoveResult<T> {
+    //     assert!(Self::__M_IS_GREATER_THAN_ONE);
+    //     assert!(Self::__M_IS_EVEN);
+
+    //     // SAFETY: `len` pivots are init
+    //     let pivots = unsafe { self.pivots.as_slice(self.len) };
+
+    //     let index = match pivots.binary_search_by(|pivot| q.compare(pivot).reverse()) {
+    //         Ok(index) => {
+    //             if height == 0 {
+    //                 let value = unsafe { self.pivots.remove(self.len, index) };
+    //                 self.len -= 1;
+    //                 if self.len < M / 2 {
+    //                     return RemoveResult::Underflow(value);
+    //                 } else {
+    //                     return RemoveResult::Done(value);
+    //                 }
+    //             } else {
+    //             }
+    //         }
+    //         Err(index) => index,
+    //     };
+
+    //     if height == 0 {
+    //         return RemoveResult::None;
+    //     }
+
+    //     debug_assert!(self.len > 0, "non leaf nodes must have some children");
+    //     let child = match index.checked_sub(1) {
+    //         // SAFETY: head is always init when height > 0
+    //         None => unsafe { self.children.head.assume_init_ref() },
+    //         // SAFETY: len children are init
+    //         Some(index) => unsafe { &self.children.tail.as_slice(self.len)[index] },
+    //     };
+
+    //     child.search(height - 1, q)
+    // }
 }
 
 pub struct OkBTree<T>(Option<BTreeInner<T>>);
@@ -290,6 +415,12 @@ enum InsertResult<T, const M: usize> {
     Done,
 }
 
+enum RemoveResult<T> {
+    Underflow(T),
+    Done(T),
+    None,
+}
+
 impl<T> OkBTree<T> {
     pub const fn new() -> Self {
         OkBTree(None)
@@ -300,6 +431,27 @@ impl<T: Ord> OkBTree<T> {
     pub fn get<Q: Comparable<T>>(&self, q: &Q) -> Option<&T> {
         let inner = self.0.as_ref()?;
         inner.node.search(inner.depth.get() - 1, q)
+    }
+
+    pub fn remove_last(&mut self) -> Option<T> {
+        if let Some(inner) = &mut self.0 {
+            if inner.node.len == 0 {
+                return None;
+            };
+            match inner.node.remove_last(inner.depth.get() - 1) {
+                Ok(val) => Some(val),
+                Err(val) => {
+                    if inner.node.len == 0 && inner.depth.get() > 1 {
+                        inner.node = unsafe { inner.node.children.head.assume_init_read() };
+                        inner.depth = NonZeroUsize::new(inner.depth.get() - 1).unwrap();
+                    }
+
+                    Some(val)
+                }
+            }
+        } else {
+            None
+        }
     }
 
     pub fn insert(&mut self, value: T) {
@@ -393,5 +545,10 @@ mod test {
         assert!(btree.get(&8).is_some());
         assert!(btree.get(&12).is_none());
         assert!(btree.get(&0).is_none());
+
+        for _ in 1..=11 {
+            dbg!(btree.remove_last());
+            dbg!(&btree);
+        }
     }
 }
