@@ -20,6 +20,9 @@ use std::slice;
 /// available. The ArrayVec can be converted into a by value iterator.
 #[repr(C)]
 pub struct DetachedArrayVec<T, const CAP: usize> {
+    #[cfg(debug_assertions)]
+    len: usize,
+
     // the `len` first elements of the array are initialized
     xs: [MaybeUninit<T>; CAP],
 }
@@ -50,6 +53,8 @@ impl<T, const CAP: usize> DetachedArrayVec<T, CAP> {
         // assert_capacity_limit!(CAP);
         unsafe {
             DetachedArrayVec {
+                #[cfg(debug_assertions)]
+                len: 0,
                 xs: MaybeUninit::uninit().assume_init(),
             }
         }
@@ -77,6 +82,12 @@ impl<T, const CAP: usize> DetachedArrayVec<T, CAP> {
             }
         }
 
+        #[cfg(debug_assertions)]
+        {
+            assert_eq!(len, self.len);
+            self.len += 1;
+        }
+
         // follows is just like Vec<T>
         unsafe {
             // infallible
@@ -95,76 +106,108 @@ impl<T, const CAP: usize> DetachedArrayVec<T, CAP> {
 
     /// Remove the element at `index` and shift down the following elements.
     ///
-    /// The `index` must be strictly less than the length of the vector.
-    ///
-    /// ***Panics*** if the `index` is out of bounds.
+    /// # Safety
+    /// * len <= CAP.
+    /// * len elements must be init.
+    /// * index < len
     pub unsafe fn remove(&mut self, len: usize, index: usize) -> T {
-        self.drain(len, index..index + 1).next().unwrap_unchecked()
-    }
+        debug_assert!(index < len);
+        debug_assert!(len <= CAP);
 
-    /// Create a draining iterator that removes the specified range in the vector
-    /// and yields the removed items from start to end. The element range is
-    /// removed even if the iterator is not consumed until the end.
-    ///
-    /// Note: It is unspecified how many elements are removed from the vector,
-    /// if the `Drain` value is leaked.
-    pub unsafe fn drain<R>(&mut self, len: usize, range: R) -> Drain<T, CAP>
-    where
-        R: RangeBounds<usize>,
-    {
-        // Memory safety
-        //
-        // When the Drain is first created, it shortens the length of
-        // the source vector to make sure no uninitialized or moved-from elements
-        // are accessible at all if the Drain's destructor never gets to run.
-        //
-        // Drain will ptr::read out the values to remove.
-        // When finished, remaining tail of the vec is copied back to cover
-        // the hole, and the vector length is restored to the new length.
-        //
-        let start = match range.start_bound() {
-            Bound::Unbounded => 0,
-            Bound::Included(&i) => i,
-            Bound::Excluded(&i) => i.saturating_add(1),
-        };
-        let end = match range.end_bound() {
-            Bound::Excluded(&j) => j,
-            Bound::Included(&j) => j.saturating_add(1),
-            Bound::Unbounded => len,
-        };
-        self.drain_range(len, start, end)
-    }
-
-    unsafe fn drain_range(&mut self, len: usize, start: usize, end: usize) -> Drain<T, CAP> {
-        if cfg!(debug_assertions) {
-            if start > end {
-                panic_oob!("drain", start, end)
-            }
-            if end > len {
-                panic_oob!("drain", end, len)
-            }
-            if len > CAP {
-                panic_oob!("drain", len, CAP)
-            }
+        #[cfg(debug_assertions)]
+        {
+            assert_eq!(len, self.len);
+            self.len -= 1;
         }
 
-        let range_slice: *const _ =
-            std::ptr::slice_from_raw_parts(unsafe { self.as_ptr().add(start) }, end - start);
+        // SAFETY: index is in bounds of the array
+        let elem = unsafe { ptr::read(self.as_mut_ptr().add(index)) };
 
+        let to_shift = len - index - 1;
+
+        // SAFETY: overlapping copy of the (index+1)..len init elements to
+        // the range index..(len-1)
         unsafe {
-            Drain {
-                len: start,
-                tail_start: end,
-                tail_len: len - end,
-                iter: (*range_slice).iter(),
-                vec: self as *mut _,
-            }
+            ptr::copy(
+                self.as_mut_ptr().add(index + 1),
+                self.as_mut_ptr().add(index),
+                to_shift,
+            );
         }
+
+        elem
     }
+
+    // /// Create a draining iterator that removes the specified range in the vector
+    // /// and yields the removed items from start to end. The element range is
+    // /// removed even if the iterator is not consumed until the end.
+    // ///
+    // /// Note: It is unspecified how many elements are removed from the vector,
+    // /// if the `Drain` value is leaked.
+    // pub unsafe fn drain<R>(&mut self, len: usize, range: R) -> Drain<T, CAP>
+    // where
+    //     R: RangeBounds<usize>,
+    // {
+    //     // Memory safety
+    //     //
+    //     // When the Drain is first created, it shortens the length of
+    //     // the source vector to make sure no uninitialized or moved-from elements
+    //     // are accessible at all if the Drain's destructor never gets to run.
+    //     //
+    //     // Drain will ptr::read out the values to remove.
+    //     // When finished, remaining tail of the vec is copied back to cover
+    //     // the hole, and the vector length is restored to the new length.
+    //     //
+    //     let start = match range.start_bound() {
+    //         Bound::Unbounded => 0,
+    //         Bound::Included(&i) => i,
+    //         Bound::Excluded(&i) => i.saturating_add(1),
+    //     };
+    //     let end = match range.end_bound() {
+    //         Bound::Excluded(&j) => j,
+    //         Bound::Included(&j) => j.saturating_add(1),
+    //         Bound::Unbounded => len,
+    //     };
+    //     self.drain_range(len, start, end)
+    // }
+
+    // unsafe fn drain_range(&mut self, len: usize, start: usize, end: usize) -> Drain<T, CAP> {
+    //     if cfg!(debug_assertions) {
+    //         if start > end {
+    //             panic_oob!("drain", start, end)
+    //         }
+    //         if end > len {
+    //             panic_oob!("drain", end, len)
+    //         }
+    //         if len > CAP {
+    //             panic_oob!("drain", len, CAP)
+    //         }
+    //     }
+
+    //     let range_slice: *const _ =
+    //         std::ptr::slice_from_raw_parts(unsafe { self.as_ptr().add(start) }, end - start);
+
+    //     unsafe {
+    //         Drain {
+    //             len: start,
+    //             tail_start: end,
+    //             tail_len: len - end,
+    //             iter: (*range_slice).iter(),
+    //             vec: self as *mut _,
+    //         }
+    //     }
+    // }
 
     pub unsafe fn split_off(&mut self, len: usize, at: usize) -> Self {
         let other_len = len - at;
         let mut other = Self::new();
+
+        debug_assert_eq!(self.len, len);
+        #[cfg(debug_assertions)]
+        {
+            self.len = at;
+            other.len = other_len;
+        }
 
         unsafe {
             ptr::copy_nonoverlapping(self.as_ptr().add(at), other.as_mut_ptr(), other_len);
@@ -179,12 +222,14 @@ impl<T, const CAP: usize> DetachedArrayVec<T, CAP> {
 
     /// Return a slice containing all elements of the vector.
     pub unsafe fn as_slice(&self, len: usize) -> &[T] {
+        debug_assert_eq!(self.len, len);
         debug_assert!(len <= Self::CAPACITY);
         unsafe { slice::from_raw_parts(self.as_ptr(), len) }
     }
 
     /// Return a mutable slice containing all elements of the vector.
     pub unsafe fn as_mut_slice(&mut self, len: usize) -> &mut [T] {
+        debug_assert_eq!(self.len, len);
         debug_assert!(len <= Self::CAPACITY);
         unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr(), len) }
     }
@@ -198,17 +243,29 @@ impl<T, const CAP: usize> DetachedArrayVec<T, CAP> {
     }
 
     pub unsafe fn push(&mut self, len: usize, element: T) {
+        debug_assert_eq!(self.len, len);
         debug_assert!(len < Self::CAPACITY);
+
+        #[cfg(debug_assertions)]
+        {
+            self.len += 1;
+        }
+
         ptr::write(self.as_mut_ptr().add(len), element);
     }
 
     pub unsafe fn pop(&mut self, len: usize) -> T {
+        debug_assert_eq!(self.len, len);
         debug_assert!(len <= Self::CAPACITY);
         debug_assert_ne!(len, 0);
-        unsafe {
-            let new_len = len - 1;
-            ptr::read(self.as_ptr().add(new_len))
+
+        let new_len = len - 1;
+        #[cfg(debug_assertions)]
+        {
+            self.len = new_len;
         }
+
+        unsafe { ptr::read(self.as_ptr().add(new_len)) }
     }
 
     pub unsafe fn clear(&mut self, len: usize) {
@@ -216,12 +273,29 @@ impl<T, const CAP: usize> DetachedArrayVec<T, CAP> {
     }
 
     pub unsafe fn truncate(&mut self, old_len: usize, new_len: usize) {
+        debug_assert_eq!(self.len, old_len);
+
         unsafe {
             if new_len < old_len {
+                #[cfg(debug_assertions)]
+                {
+                    self.len = new_len;
+                }
+
                 let tail =
                     slice::from_raw_parts_mut(self.as_mut_ptr().add(new_len), old_len - new_len);
                 ptr::drop_in_place(tail);
             }
+        }
+    }
+
+    pub unsafe fn into_iter(self, len: usize) -> IntoIter<T, CAP> {
+        debug_assert_eq!(len, self.len);
+
+        IntoIter {
+            index: 0,
+            len,
+            v: self,
         }
     }
 }
@@ -283,61 +357,61 @@ impl<T, const CAP: usize> Drop for IntoIter<T, CAP> {
     }
 }
 
-/// A draining iterator for `ArrayVec`.
-pub struct Drain<'a, T: 'a, const CAP: usize> {
-    len: usize,
-    /// Index of tail to preserve
-    tail_start: usize,
-    /// Length of tail
-    tail_len: usize,
-    /// Current remaining range to remove
-    iter: slice::Iter<'a, T>,
-    vec: *mut DetachedArrayVec<T, CAP>,
-}
+// /// A draining iterator for `ArrayVec`.
+// pub struct Drain<'a, T: 'a, const CAP: usize> {
+//     len: usize,
+//     /// Index of tail to preserve
+//     tail_start: usize,
+//     /// Length of tail
+//     tail_len: usize,
+//     /// Current remaining range to remove
+//     iter: slice::Iter<'a, T>,
+//     vec: *mut DetachedArrayVec<T, CAP>,
+// }
 
-unsafe impl<'a, T: Sync, const CAP: usize> Sync for Drain<'a, T, CAP> {}
-unsafe impl<'a, T: Send, const CAP: usize> Send for Drain<'a, T, CAP> {}
+// unsafe impl<'a, T: Sync, const CAP: usize> Sync for Drain<'a, T, CAP> {}
+// unsafe impl<'a, T: Send, const CAP: usize> Send for Drain<'a, T, CAP> {}
 
-impl<'a, T: 'a, const CAP: usize> Iterator for Drain<'a, T, CAP> {
-    type Item = T;
+// impl<'a, T: 'a, const CAP: usize> Iterator for Drain<'a, T, CAP> {
+//     type Item = T;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter
-            .next()
-            .map(|elt| unsafe { ptr::read(elt as *const _) })
-    }
+//     fn next(&mut self) -> Option<Self::Item> {
+//         self.iter
+//             .next()
+//             .map(|elt| unsafe { ptr::read(elt as *const _) })
+//     }
 
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.iter.size_hint()
-    }
-}
+//     fn size_hint(&self) -> (usize, Option<usize>) {
+//         self.iter.size_hint()
+//     }
+// }
 
-impl<'a, T: 'a, const CAP: usize> DoubleEndedIterator for Drain<'a, T, CAP> {
-    fn next_back(&mut self) -> Option<Self::Item> {
-        self.iter
-            .next_back()
-            .map(|elt| unsafe { ptr::read(elt as *const _) })
-    }
-}
+// impl<'a, T: 'a, const CAP: usize> DoubleEndedIterator for Drain<'a, T, CAP> {
+//     fn next_back(&mut self) -> Option<Self::Item> {
+//         self.iter
+//             .next_back()
+//             .map(|elt| unsafe { ptr::read(elt as *const _) })
+//     }
+// }
 
-impl<'a, T: 'a, const CAP: usize> ExactSizeIterator for Drain<'a, T, CAP> {}
+// impl<'a, T: 'a, const CAP: usize> ExactSizeIterator for Drain<'a, T, CAP> {}
 
-impl<'a, T: 'a, const CAP: usize> Drop for Drain<'a, T, CAP> {
-    fn drop(&mut self) {
-        // len is currently 0 so panicking while dropping will not cause a double drop.
+// impl<'a, T: 'a, const CAP: usize> Drop for Drain<'a, T, CAP> {
+//     fn drop(&mut self) {
+//         // len is currently 0 so panicking while dropping will not cause a double drop.
 
-        // exhaust self first
-        while let Some(_) = self.next() {}
+//         // exhaust self first
+//         while let Some(_) = self.next() {}
 
-        if self.tail_len > 0 {
-            unsafe {
-                let source_vec = &mut *self.vec;
-                // memmove back untouched tail, update to new length
-                let start = self.len;
-                let tail = self.tail_start;
-                let ptr = source_vec.as_mut_ptr();
-                ptr::copy(ptr.add(tail), ptr.add(start), self.tail_len);
-            }
-        }
-    }
-}
+//         if self.tail_len > 0 {
+//             unsafe {
+//                 let source_vec = &mut *self.vec;
+//                 // memmove back untouched tail, update to new length
+//                 let start = self.len;
+//                 let tail = self.tail_start;
+//                 let ptr = source_vec.as_mut_ptr();
+//                 ptr::copy(ptr.add(tail), ptr.add(start), self.tail_len);
+//             }
+//         }
+//     }
+// }

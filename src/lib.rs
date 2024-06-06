@@ -1,3 +1,5 @@
+#![warn(unsafe_op_in_unsafe_fn)]
+
 use std::{mem::MaybeUninit, num::NonZeroUsize};
 
 use arrayvec::DetachedArrayVec;
@@ -29,14 +31,20 @@ impl<T, const M: usize> NodeArray<T, M> {
     /// height must be correct.
     unsafe fn drop_inner(&mut self, height: usize) {
         if std::mem::needs_drop::<T>() {
-            self.pivots.clear(self.len);
+            // SAFETY: len pivots are init
+            unsafe { self.pivots.clear(self.len) };
         }
         if height > 0 {
             debug_assert!(self.len > 0);
-            self.children.head.assume_init_read().drop_inner(height - 1);
+            // SAFETY: internal nodes must always have children
+            unsafe { self.children.head.assume_init_read().drop_inner(height - 1) };
 
-            for mut c in self.children.tail.drain(self.len, 0..self.len) {
-                c.drop_inner(height - 1);
+            let tail = self.children.tail.take();
+
+            // SAFETY: len children are init in the tail.
+            for mut c in unsafe { tail.into_iter(self.len) } {
+                // SAFETY: height is correct and doesn't underflow.
+                unsafe { c.drop_inner(height - 1) };
             }
         }
         self.len = 0;
@@ -55,7 +63,7 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
     };
 
     #[cold]
-    fn rotate(
+    fn insert_split(
         &mut self,
         index: usize,
         value: T,
@@ -163,7 +171,7 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
         }
 
         if self.len == M {
-            self.rotate(index, value, new_child)
+            self.insert_split(index, value, new_child)
         } else {
             // SAFETY:
             // * len children and pivots are currently init
