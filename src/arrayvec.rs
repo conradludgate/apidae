@@ -1,6 +1,6 @@
 use std::mem;
 use std::mem::MaybeUninit;
-use std::ptr;
+use std::ptr::{self, addr_of_mut};
 use std::slice;
 
 /// A vector with a fixed capacity.
@@ -24,6 +24,24 @@ pub struct DetachedArrayVec<T, const CAP: usize> {
 
     // the `len` first elements of the array are initialized
     xs: [MaybeUninit<T>; CAP],
+}
+
+macro_rules! debug_assert_eq {
+    ($($arg:tt)*) => {
+        #[cfg(debug_assertions)]
+        {
+            assert_eq!($($arg)*);
+        }
+    };
+}
+
+macro_rules! debug_assert {
+    ($($arg:tt)*) => {
+        #[cfg(debug_assertions)]
+        {
+            assert!($($arg)*);
+        }
+    };
 }
 
 macro_rules! panic_oob {
@@ -234,6 +252,15 @@ impl<T, const CAP: usize> DetachedArrayVec<T, CAP> {
 
     fn as_ptr(&self) -> *const T {
         self.xs.as_ptr() as _
+    }
+
+    pub unsafe fn get_ptr_mut(this: *mut Self, index: usize) -> *mut T {
+        unsafe {
+            addr_of_mut!((*this).xs)
+                .cast::<MaybeUninit<T>>()
+                .add(index)
+                .cast::<T>()
+        }
     }
 
     fn as_mut_ptr(&mut self) -> *mut T {

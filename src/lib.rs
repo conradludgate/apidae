@@ -4,6 +4,7 @@ use std::{
     hint::unreachable_unchecked,
     mem::{self, MaybeUninit},
     num::NonZeroUsize,
+    ptr::{addr_of, addr_of_mut},
 };
 
 use arrayvec::DetachedArrayVec;
@@ -11,8 +12,8 @@ use equivalent::Comparable;
 
 mod arrayvec;
 
-// const M: usize = 8;
-const M: usize = 2;
+const M: usize = 8;
+// const M: usize = 2;
 
 impl<T, const M: usize> Children<T, M> {
     const fn new() -> Self {
@@ -61,22 +62,33 @@ struct Children<T, const M: usize> {
 }
 
 impl<T, const M: usize> Children<T, M> {
-    fn get(&self, len: usize, index: usize) -> &NodeArray<T, M> {
-        match index.checked_sub(1) {
-            // SAFETY: head is always init when height > 0
-            None => unsafe { self.head.assume_init_ref() },
-            // SAFETY: tail len are init
-            Some(index) => unsafe { &self.tail.as_slice(len)[index] },
-        }
-    }
+    // fn get(&self, len: usize, index: usize) -> &NodeArray<T, M> {
+    //     match index.checked_sub(1) {
+    //         // SAFETY: head is always init when height > 0
+    //         None => unsafe { self.head.assume_init_ref() },
+    //         // SAFETY: tail len are init
+    //         Some(index) => unsafe { &self.tail.as_slice(len)[index] },
+    //     }
+    // }
     fn get_mut(&mut self, len: usize, index: usize) -> &mut NodeArray<T, M> {
         match index.checked_sub(1) {
             // SAFETY: head is always init when height > 0
             None => unsafe { self.head.assume_init_mut() },
             // SAFETY: tail len are init
-            Some(index) => unsafe { &mut self.tail.as_mut_slice(len)[index] },
+            Some(index) => unsafe { self.tail.as_mut_slice(len).get_unchecked_mut(index) },
         }
     }
+    fn get_ptr_mut(this: *mut Self, index: usize) -> *mut NodeArray<T, M> {
+        let boxed_node = match index.checked_sub(1) {
+            // SAFETY: head is always init when height > 0
+            None => unsafe { addr_of_mut!((*this).head).cast() },
+            Some(index) => unsafe {
+                DetachedArrayVec::get_ptr_mut(addr_of_mut!((*this).tail), index)
+            },
+        };
+        unsafe { addr_of_mut!(**boxed_node) }
+    }
+
     unsafe fn push_front(&mut self, len: usize, t: Box<NodeArray<T, M>>) {
         unsafe {
             let head = mem::replace(self.head.assume_init_mut(), t);
@@ -180,7 +192,7 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
 
         let index = match Comp::from_comp(&value).binary_search(pivots, height) {
             Ok(index) => {
-                pivots[index] = value;
+                unsafe { *pivots.get_unchecked_mut(index) = value };
                 return InsertResult::Done;
             }
             Err(index) => index,
@@ -220,26 +232,40 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
         }
     }
 
-    fn search<B: BinarySearch<T>>(&self, height: usize, b: &B) -> Option<&T> {
+    unsafe fn search_raw<B: BinarySearch<T>>(
+        this: *mut Self,
+        height: usize,
+        b: &B,
+    ) -> Option<(usize, *mut NodeArray<T, M>)> {
         assert!(Self::__M_IS_GREATER_THAN_ONE);
         assert!(Self::__M_IS_EVEN);
 
-        // SAFETY: `len` pivots are init
-        let pivots = unsafe { self.pivots.as_slice(self.len) };
+        // SAFETY: caller must assert that this is readable.
+        let len = unsafe { *addr_of!((*this).len) };
+        let pivots = unsafe { &*addr_of!((*this).pivots) };
 
-        let index = match b.binary_search(pivots, height) {
-            Ok(index) => return Some(&pivots[index]),
-            Err(index) => index,
+        let index = {
+            // temporarily borrow pivots to perform the binary search.
+            // SAFETY: `len` pivots are init
+            let pivots = unsafe { pivots.as_slice(len) };
+
+            match b.binary_search(pivots, height) {
+                Ok(index) => return Some((index, this)),
+                Err(index) => index,
+            }
         };
 
         if height == 0 {
             return None;
         }
 
-        debug_assert!(self.len > 0, "non leaf nodes must have some children");
-        let child = self.children.get(self.len, index);
+        debug_assert!(len > 0, "non leaf nodes must have some children");
+        // SAFETY: caller must assert that this is readable.
+        // for height > 0, children are always init.
+        let children = unsafe { addr_of_mut!((*this).children) };
+        let child = Children::get_ptr_mut(children, index);
 
-        child.search(height - 1, b)
+        unsafe { Self::search_raw(child, height - 1, b) }
     }
 
     // ok - no underflow
@@ -272,7 +298,7 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
         let value = match binary_search {
             Ok(_) => child
                 .remove(height - 1, &Last)?
-                .map(|v| std::mem::replace(&mut pivots[index], v)),
+                .map(|v| std::mem::replace(unsafe { pivots.get_unchecked_mut(index) }, v)),
             Err(_) => child.remove(height - 1, b)?,
         };
         let value = match value {
@@ -284,8 +310,12 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
             // SAFETY: head is always init when height > 0
             None => unsafe {
                 let child = self.children.head.assume_init_mut();
-                let next_child = &mut self.children.tail.as_mut_slice(self.len)[0];
-                let pivot = &mut pivots[0];
+                let next_child = self
+                    .children
+                    .tail
+                    .as_mut_slice(self.len)
+                    .get_unchecked_mut(0);
+                let pivot = pivots.get_unchecked_mut(0);
 
                 if next_child.len > M / 2 {
                     Self::rotate_left(height, child, pivot, next_child);
@@ -315,15 +345,17 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
 
         // check the right sibling first
         if index + 1 < self.len {
-            let children = unsafe { self.children.tail.as_mut_slice(self.len) };
-            let [child, next_child] = &mut children[index..index + 2] else {
-                unsafe { unreachable_unchecked() }
-            };
-            let pivot = &mut pivots[index + 1];
+            unsafe {
+                let children = self.children.tail.as_mut_slice(self.len);
+                let [child, next_child] = children.get_unchecked_mut(index..index + 2) else {
+                    unreachable_unchecked()
+                };
+                let pivot = &mut pivots[index + 1];
 
-            if next_child.len > M / 2 {
-                Self::rotate_left(height, child, pivot, next_child);
-                return Some(RemoveResult::Done(value));
+                if next_child.len > M / 2 {
+                    Self::rotate_left(height, child, pivot, next_child);
+                    return Some(RemoveResult::Done(value));
+                }
             }
         }
 
@@ -332,12 +364,15 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
                 None => unsafe {
                     [
                         self.children.head.assume_init_mut(),
-                        &mut self.children.tail.as_mut_slice(self.len)[0],
+                        self.children
+                            .tail
+                            .as_mut_slice(self.len)
+                            .get_unchecked_mut(0),
                     ]
                 },
                 Some(index) => unsafe {
                     let children = self.children.tail.as_mut_slice(self.len);
-                    let x: &mut [_; 2] = (&mut children[index..index + 2])
+                    let x: &mut [_; 2] = (children.get_unchecked_mut(index..index + 2))
                         .try_into()
                         .unwrap_unchecked();
                     x.each_mut()
@@ -505,6 +540,7 @@ impl<Q> Comp<Q> {
 struct Last;
 
 impl<K> BinarySearch<K> for Last {
+    #[inline]
     fn binary_search(&self, pivots: &[K], height: usize) -> Result<usize, usize> {
         if height == 0 && !pivots.is_empty() {
             Ok(pivots.len() - 1)
@@ -517,6 +553,7 @@ impl<K> BinarySearch<K> for Last {
 struct First;
 
 impl<K> BinarySearch<K> for First {
+    #[inline]
     fn binary_search(&self, pivots: &[K], height: usize) -> Result<usize, usize> {
         if height == 0 && !pivots.is_empty() {
             Ok(0)
@@ -622,17 +659,29 @@ impl<T> OkBTree<T> {
 }
 
 impl<T: Ord> OkBTree<T> {
-    pub fn get<Q: Comparable<T>>(&self, q: &Q) -> Option<&T> {
+    fn search<B: BinarySearch<T>>(&self, b: &B) -> Option<&T> {
         let inner = self.0.as_ref()?;
-        inner.node.search(inner.depth.get() - 1, Comp::from_comp(q))
+        unsafe {
+            let (index, child) = NodeArray::<T, M>::search_raw(
+                &*inner.node as *const NodeArray<T, M> as *mut _,
+                inner.depth.get() - 1,
+                b,
+            )?;
+
+            let pivots = addr_of!((*child).pivots);
+            let value = DetachedArrayVec::get_ptr_mut(pivots.cast_mut(), index);
+            Some(&*value)
+        }
+    }
+
+    pub fn get<Q: Comparable<T>>(&self, q: &Q) -> Option<&T> {
+        self.search(Comp::from_comp(q))
     }
     pub fn last(&self) -> Option<&T> {
-        let inner = self.0.as_ref()?;
-        inner.node.search(inner.depth.get() - 1, &Last)
+        self.search(&Last)
     }
     pub fn first(&self) -> Option<&T> {
-        let inner = self.0.as_ref()?;
-        inner.node.search(inner.depth.get() - 1, &First)
+        self.search(&First)
     }
 
     fn remove_inner<B: BinarySearch<T>>(&mut self, b: &B) -> Option<T> {
@@ -721,10 +770,22 @@ impl<T> Default for OkBTree<T> {
     }
 }
 
-#[inline(never)]
-pub fn insert_i32(x: &mut OkBTree<i32>) {
-    x.insert(1);
-}
+// #[inline(never)]
+// pub fn insert_i32(x: &mut OkBTree<i32>) {
+//     x.insert(1);
+// }
+// #[inline(never)]
+// pub fn search_i32(x: &OkBTree<i32>) -> i32 {
+//     x.get(&1).copied().unwrap_or_default()
+// }
+// #[inline(never)]
+// pub fn search2_i32(x: &std::collections::BTreeSet<i32>) -> i32 {
+//     x.get(&1).copied().unwrap_or_default()
+// }
+// #[inline(never)]
+// pub fn remove_i32(x: &mut OkBTree<i32>) -> i32 {
+//     x.remove_first().unwrap_or_default()
+// }
 
 #[cfg(test)]
 mod test {
@@ -733,52 +794,50 @@ mod test {
     #[test]
     fn get() {
         let mut btree = OkBTree::new();
-        for i in 50..100 {
+        for i in 500..1000 {
             btree.insert(i);
         }
 
-        for i in 50..100 {
+        assert!(btree.get(&499).is_none());
+        for i in 500..1000 {
             assert_eq!(btree.get(&i), Some(&i));
         }
+        assert!(btree.get(&1000).is_none());
 
-        assert!(btree.get(&49).is_none());
-        assert!(btree.get(&100).is_none());
-        assert!(btree.get(&0).is_none());
-
-        assert_eq!(btree.first(), Some(&50));
-        assert_eq!(btree.last(), Some(&99));
+        assert_eq!(btree.first(), Some(&500));
+        assert_eq!(btree.last(), Some(&999));
     }
 
     #[test]
     fn remove_last() {
         let mut btree = OkBTree::new();
-        for i in 0..100 {
+        for i in 0..1000 {
             btree.insert(i);
         }
 
-        for i in (0..100).rev() {
+        for i in (0..1000).rev() {
             assert_eq!(btree.remove_last(), Some(i));
         }
     }
     #[test]
     fn remove_first() {
         let mut btree = OkBTree::new();
-        for i in 0..100 {
+        for i in 0..1000 {
             btree.insert(i);
         }
 
-        for i in 0..100 {
+        for i in 0..1000 {
             assert_eq!(btree.remove_first(), Some(i));
         }
     }
     #[test]
     fn remove() {
         let mut btree = OkBTree::new();
-        for i in 0..100 {
+        for i in 0..1000 {
             btree.insert(i);
         }
 
-        for i in 0..100 {
+        for i in 0..1000 {
             assert_eq!(btree.remove(&i), Some(i));
         }
     }
