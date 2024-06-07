@@ -421,11 +421,8 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
         if height == 1 {
             // lhs and rhs are leaf nodes
             unsafe {
-                let new = match lhs.remove(height - 1, &Last) {
-                    Some(RemoveResult::Done(p)) => p,
-                    // SAFETY: lhs cannot underflow on removal.
-                    _ => unreachable_unchecked(),
-                };
+                let new = lhs.pivots.pop(lhs.len);
+                lhs.len -= 1;
 
                 let old = std::mem::replace(pivot, new);
                 rhs.pivots.insert(M / 2 - 1, 0, old);
@@ -461,11 +458,8 @@ impl<T: Ord, const M: usize> NodeArray<T, M> {
         if height == 1 {
             // lhs and rhs are leaf nodes
             unsafe {
-                let new = match rhs.remove(height - 1, &First) {
-                    Some(RemoveResult::Done(p)) => p,
-                    // SAFETY: rhs cannot underflow on removal.
-                    _ => unreachable_unchecked(),
-                };
+                let new = rhs.pivots.remove(rhs.len, 0);
+                rhs.len -= 1;
 
                 let old = std::mem::replace(pivot, new);
                 lhs.pivots.push(M / 2 - 1, old);

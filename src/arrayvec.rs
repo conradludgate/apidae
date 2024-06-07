@@ -120,19 +120,17 @@ impl<T, const CAP: usize> DetachedArrayVec<T, CAP> {
             self.len -= 1;
         }
 
+        let this = self.as_mut_ptr();
+
         // SAFETY: index is in bounds of the array
-        let elem = unsafe { ptr::read(self.as_mut_ptr().add(index)) };
+        let elem = unsafe { ptr::read(this.add(index)) };
 
         let to_shift = len - index - 1;
 
         // SAFETY: overlapping copy of the (index+1)..len init elements to
         // the range index..(len-1)
         unsafe {
-            ptr::copy(
-                self.as_mut_ptr().add(index + 1),
-                self.as_mut_ptr().add(index),
-                to_shift,
-            );
+            ptr::copy(this.add(index + 1), this.add(index), to_shift);
         }
 
         elem
