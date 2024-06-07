@@ -251,7 +251,9 @@ impl<T, const CAP: usize> DetachedArrayVec<T, CAP> {
             self.len += 1;
         }
 
-        unsafe { ptr::write(self.as_mut_ptr().add(len), element); }
+        unsafe {
+            ptr::write(self.as_mut_ptr().add(len), element);
+        }
     }
 
     pub unsafe fn pop(&mut self, len: usize) -> T {
